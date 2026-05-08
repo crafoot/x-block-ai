@@ -25,12 +25,10 @@
 
   async function saveState() {
     var handles = Object.keys(db.accounts).filter(function(h) { return db.accounts[h].blocked; });
-    await chrome.storage.local.set((function() {
-      var d = {};
-      d[STORAGE] = db;
-      d[BLOCKED] = handles;
-      return d;
-    })());
+    var data = {};
+    data[STORAGE] = db;
+    data[BLOCKED] = handles;
+    await chrome.storage.local.set(data);
   }
 
   // ── Feature extraction ──
