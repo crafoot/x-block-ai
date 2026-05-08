@@ -40,7 +40,9 @@
 
   async function saveDB(db) {
     db.updatedAt = new Date().toISOString();
-    await chrome.storage.local.set(((_a={}, _a[STORAGE_DB]=db, _a)));
+    var data = {};
+    data[STORAGE_DB] = db;
+    await chrome.storage.local.set(data);
   }
 
   async function getConfig() {
@@ -53,7 +55,9 @@
   }
 
   async function saveConfig(cfg) {
-    await chrome.storage.local.set(((_b={}, _b[STORAGE_CONFIG]=cfg, _b)));
+    var data = {};
+    data[STORAGE_CONFIG] = cfg;
+    await chrome.storage.local.set(data);
   }
 
   // ── Tier 1: blocked account check ──
