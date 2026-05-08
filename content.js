@@ -269,6 +269,11 @@
   function recordSample(text, profile, label, source, reason, weight) {
     if (!db) return;
     db.samples = db.samples || [];
+    if (!label && source === "llm") {
+      var hamCount = db.samples.filter(function(s) { return s.label === "ham" && s.source === "llm"; }).length;
+      var spamCount = db.samples.filter(function(s) { return s.label === "spam"; }).length;
+      if (hamCount >= Math.max(12, spamCount * 2)) return;
+    }
     db.samples.push({
       label: label ? "spam" : "ham",
       source: source || "",

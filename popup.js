@@ -81,15 +81,21 @@
     var raw = await chrome.storage.local.get("xhb2-db");
     var db = raw["xhb2-db"] || {};
     var accounts = Object.values(db.accounts || {}).filter(function(a) { return a.blocked; }).slice(-8).reverse();
-    var samples = (db.samples || []).slice(-8).reverse();
+    var spamSamples = (db.samples || []).filter(function(s) { return s.label === "spam"; }).slice(-6).reverse();
+    var hamSamples = (db.samples || []).filter(function(s) { return s.label === "ham"; }).slice(-6).reverse();
     var rules = (db.aiRules || []).slice(0, 5);
     var html = "";
     html += '<div class="data-row"><div class="data-meta">最近屏蔽账号</div>' +
       (accounts.length ? accounts.map(function(a) {
         return '<div class="data-text">' + escapeHTML(a.handle) + ' ' + escapeHTML(a.displayName || "") + '</div>';
       }).join("") : '<div class="data-text">暂无</div>') + '</div>';
-    html += '<div class="data-row"><div class="data-meta">最近样本</div>' +
-      (samples.length ? samples.map(function(s) {
+    html += '<div class="data-row"><div class="data-meta">最近屏蔽样本</div>' +
+      (spamSamples.length ? spamSamples.map(function(s) {
+        return '<div class="data-text">[' + escapeHTML(s.source) + '/w' + escapeHTML(s.weight || 1) + '] ' +
+          escapeHTML(s.handle) + ' ' + escapeHTML(s.displayName) + '：' + escapeHTML(s.text) + '</div>';
+      }).join("") : '<div class="data-text">暂无</div>') + '</div>';
+    html += '<div class="data-row"><div class="data-meta">最近正常/纠错样本</div>' +
+      (hamSamples.length ? hamSamples.map(function(s) {
         return '<div class="data-text">[' + escapeHTML(s.label) + '/' + escapeHTML(s.source) + '/w' + escapeHTML(s.weight || 1) + '] ' +
           escapeHTML(s.handle) + ' ' + escapeHTML(s.displayName) + '：' + escapeHTML(s.text) + '</div>';
       }).join("") : '<div class="data-text">暂无</div>') + '</div>';
