@@ -149,6 +149,13 @@
     if (!blockItem) { document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true})); return; }
     blockItem.click(); await wait(600);
 
+    // Hide the confirmation dialog so it doesn't flash
+    var hideStyle = document.createElement("style");
+    hideStyle.id = "xhb2-hide-dialog";
+    hideStyle.textContent = '[role="dialog"]{opacity:0!important} [data-testid*="confirmation"]{opacity:0!important} [data-testid*="sheet"]{opacity:0!important}';
+    document.head.appendChild(hideStyle);
+    await wait(250);
+
     // Try multiple strategies to find confirm button
     var confirm = null;
     var allBtns = document.querySelectorAll('[role="dialog"] [role="button"], [data-testid="confirmationSheetConfirm"], [data-testid="confirmationSheetDialog"] [role="button"]');
@@ -161,18 +168,22 @@
       allBtns.forEach(function(b) { if (/(Block|屏蔽|封锁|ブロック)/i.test((b.innerText||"").trim())) confirm = b; });
     }
     
-    // Strategy 3: bright/bold/primary button (usually the destructive action)
+    // Strategy 3: last button in dialog
     if (!confirm) {
       var dialog = document.querySelector('[role="dialog"]');
       if (dialog) {
         var dialogBtns = dialog.querySelectorAll('[role="button"]');
-        // Last button in dialog is usually confirm
         if (dialogBtns.length > 0) confirm = dialogBtns[dialogBtns.length - 1];
       }
     }
 
-    if (!confirm) { document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true})); return; }
-    confirm.click();
+    if (confirm) confirm.click();
+    else document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
+
+    // Clean up hide style
+    await wait(500);
+    var s = document.getElementById("xhb2-hide-dialog");
+    if (s) s.remove();
   }
 
   // ── Check if blocked ──
