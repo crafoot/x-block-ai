@@ -1,240 +1,213 @@
 (function() {
   "use strict";
 
-  var ARTICLE_SEL = 'article[role="article"]';
-  var TEXT_SEL = '[data-testid="tweetText"]';
-  var NAME_SEL = '[data-testid="User-Name"]';
-  var PROCESSED = "data-xhb2";
-  var MASKED = "data-xhb2-masked";
-  var REVEALED = "data-xhb2-revealed";
+  var ARTICLE = 'article[role="article"]';
+  var TEXT = '[data-testid="tweetText"]';
+  var NAME = '[data-testid="User-Name"]';
+  var STORAGE = "xhb2-db";
+  var BLOCKED = "xhb2-blocked";
 
-  var config = null;
+  var config = { autoBlock: true };
+  var blockedHandles = new Set();
+  var db = null;
   var observer = null;
   var scheduled = false;
-  var classifying = new Set();
   var blockQueue = Promise.resolve();
 
-  // ── DOM helpers ──
-  function getArticleText(article) {
-    var el = article.querySelector(TEXT_SEL);
-    return el ? el.innerText.trim() : "";
+  // ── Load state ──
+  async function loadState() {
+    var raw = await chrome.storage.local.get([STORAGE, "xhb2-config", BLOCKED]);
+    db = raw[STORAGE] || { accounts: {}, bayes: { spamCount: 0, hamCount: 0, words: {} } };
+    config = raw["xhb2-config"] || config;
+    blockedHandles = new Set(raw[BLOCKED] || []);
+    schedule();
   }
 
-  function getProfile(article) {
-    var nameEl = article.querySelector(NAME_SEL);
-    var raw = nameEl ? nameEl.innerText : "";
-    var m = raw.match(/@([A-Za-z0-9_]+)/);
-    var handle = m ? "@" + m[1] : "";
-    var displayName = m ? raw.slice(0, m.index).trim() : raw.trim();
-    return { displayName: displayName, handle: handle };
+  async function saveState() {
+    var handles = Object.keys(db.accounts).filter(function(h) { return db.accounts[h].blocked; });
+    await chrome.storage.local.set((function() {
+      var d = {};
+      d[STORAGE] = db;
+      d[BLOCKED] = handles;
+      return d;
+    })());
   }
 
-  function isPureText(article) {
-    var textNode = article.querySelector(TEXT_SEL);
-    if (!textNode) return false;
-    var mediaSelectors = [
-      '[data-testid="tweetPhoto"]', '[data-testid="videoPlayer"]',
-      '[data-testid="card.wrapper"]', '[role="blockquote"]'
-    ];
-    return !mediaSelectors.some(function(s) {
-      var m = article.querySelector(s);
-      return m && !textNode.contains(m);
-    });
-  }
-
-  // ── Masking ──
-  function applyMask(article, reason) {
-    article.setAttribute(MASKED, "true");
-    article.setAttribute("data-xhb2-reason", reason);
-
-    var overlay = article.querySelector(".xhb2-overlay");
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.className = "xhb2-overlay";
-      var meta = document.createElement("div");
-      meta.className = "xhb2-overlay-meta";
-      meta.textContent = "🤖 AI判定垃圾评论";
-      var btn = document.createElement("button");
-      btn.className = "xhb2-overlay-btn";
-      btn.textContent = "恢复查看";
-      btn.onclick = function(e) {
-        e.preventDefault(); e.stopPropagation();
-        var r = article.getAttribute(REVEALED) === "true";
-        article.setAttribute(REVEALED, r ? "false" : "true");
-        btn.textContent = r ? "恢复查看" : "重新屏蔽";
-        meta.textContent = r ? "🤖 AI判定垃圾评论" : "已恢复查看";
-      };
-      overlay.append(meta, btn);
-      article.appendChild(overlay);
+  // ── Feature extraction ──
+  function getFeatures(text) {
+    var cleaned = (text || "").toLowerCase().replace(/\s+/g, " ").trim();
+    if (!cleaned) return [];
+    var feats = [];
+    for (var n = 3; n <= 4; n++) {
+      for (var i = 0; i <= cleaned.length - n; i++) {
+        feats.push(cleaned.slice(i, i + n));
+      }
     }
-
-    // Blur content
-    [TEXT_SEL, NAME_SEL].forEach(function(s) {
-      article.querySelectorAll(s).forEach(function(el) {
-        el.classList.add("xhb2-blur");
-      });
-    });
+    cleaned.split(/\s+/).forEach(function(w) { if (w.length >= 2) feats.push("W:" + w); });
+    return Array.from(new Set(feats));
   }
 
-  function clearMask(article) {
-    article.removeAttribute(MASKED);
-    article.removeAttribute(REVEALED);
-    article.querySelector(".xhb2-overlay")?.remove();
-    article.querySelectorAll(".xhb2-blur").forEach(function(el) {
-      el.classList.remove("xhb2-blur");
-    });
+  // ── DOM helpers ──
+  function getText(article) { var el = article.querySelector(TEXT); return el ? el.innerText.trim() : ""; }
+  function getProfile(article) {
+    var el = article.querySelector(NAME);
+    var raw = el ? el.innerText : "";
+    var m = raw.match(/@([A-Za-z0-9_]+)/);
+    return { displayName: m ? raw.slice(0, m.index).trim() : raw.trim(), handle: m ? "@" + m[1] : "" };
   }
 
-  // ── Manual block button ──
+  // ── Manual block ──
   function ensureBlockBtn(article) {
-    var btn = article.querySelector(".xhb2-block-btn");
-    if (btn) return;
-    btn = document.createElement("button");
+    if (article.querySelector(".xhb2-block-btn")) return;
+    var btn = document.createElement("button");
     btn.className = "xhb2-block-btn";
     btn.textContent = "🚫 屏蔽并学习";
     btn.onclick = async function(e) {
       e.preventDefault(); e.stopPropagation();
-      btn.textContent = "⏳ 学习中...";
-      btn.disabled = true;
+      btn.textContent = "⏳"; btn.disabled = true;
 
-      var text = getArticleText(article);
+      var text = getText(article);
       var profile = getProfile(article);
+      var h = (profile.handle || "").toLowerCase().replace(/^@/, "");
 
-      await chrome.runtime.sendMessage({
-        type: "XHB2_MANUAL_BLOCK",
-        text: text,
-        profile: profile
-      });
+      if (h && text) {
+        // Add to account DB
+        if (!db.accounts[h]) {
+          db.accounts[h] = {
+            handle: "@" + h, displayName: profile.displayName,
+            blocked: true, reasons: ["manual"], sources: ["manual"],
+            firstSeen: new Date().toISOString(), lastSeen: new Date().toISOString(),
+            blockedAt: new Date().toISOString(), blockCount: 1
+          };
+        } else {
+          db.accounts[h].blocked = true;
+          db.accounts[h].reasons = (db.accounts[h].reasons || []).concat(["manual"]);
+          db.accounts[h].blockCount = (db.accounts[h].blockCount || 0) + 1;
+          db.accounts[h].lastSeen = new Date().toISOString();
+          db.accounts[h].blockedAt = new Date().toISOString();
+        }
+        blockedHandles.add(h);
+
+        // Train bayes
+        db.bayes.spamCount++;
+        var feats = getFeatures(text);
+        feats.forEach(function(f) {
+          if (!db.bayes.words[f]) db.bayes.words[f] = { spam: 0, ham: 0 };
+          db.bayes.words[f].spam++;
+        });
+
+        await saveState();
+      }
 
       applyMask(article, "manual");
-      btn.textContent = "✅ 已学习";
+      enqueueAutoBlock(article, profile.handle);
+      btn.textContent = "✅"; btn.disabled = false;
     };
     article.appendChild(btn);
   }
 
-  // ── Auto-classify ──
-  async function autoClassify(article, text, profile) {
-    var handle = profile.handle.toLowerCase();
-    if (classifying.has(handle)) return;
-    classifying.add(handle);
-
-    try {
-      var resp = await chrome.runtime.sendMessage({
-        type: "XHB2_CLASSIFY",
-        text: text,
-        profile: profile
-      });
-      if (resp && resp.isSpam && config.autoBlock) {
-        applyMask(article, resp.reason);
-        enqueueAutoBlock(article, handle);
-      }
-    } catch(e) {
-      console.warn("xhb2 classify err:", e);
-    } finally {
-      classifying.delete(handle);
-    }
+  // ── Masking ──
+  function applyMask(article, reason) {
+    article.setAttribute("data-xhb2-masked", "true");
+    article.setAttribute("data-xhb2-reason", reason);
+    if (article.querySelector(".xhb2-overlay")) return;
+    var overlay = document.createElement("div");
+    overlay.className = "xhb2-overlay";
+    var meta = document.createElement("div");
+    meta.className = "xhb2-overlay-meta";
+    meta.textContent = "🚫 已屏蔽";
+    var btn = document.createElement("button");
+    btn.className = "xhb2-overlay-btn";
+    btn.textContent = "恢复";
+    btn.onclick = function(e) {
+      e.preventDefault(); e.stopPropagation();
+      var rev = article.getAttribute("data-xhb2-revealed") === "true";
+      article.setAttribute("data-xhb2-revealed", rev ? "false" : "true");
+      btn.textContent = rev ? "恢复" : "隐藏";
+    };
+    overlay.append(meta, btn);
+    article.appendChild(overlay);
+    [TEXT, NAME].forEach(function(s) {
+      article.querySelectorAll(s).forEach(function(el) { el.classList.add("xhb2-blur"); });
+    });
   }
 
   // ── Auto-block via DOM ──
   function enqueueAutoBlock(article, handle) {
-    blockQueue = blockQueue.then(function() {
-      return autoBlockAccount(article, handle);
-    }).catch(function() {});
+    blockQueue = blockQueue.then(function() { return autoBlock(article, handle); }).catch(function() {});
   }
-
-  function wait(ms) {
-    return new Promise(function(r) { setTimeout(r, ms); });
-  }
-
-  async function autoBlockAccount(article, handle) {
-    var cleanHandle = handle.replace("@", "");
-    var menuBtn = article.querySelector('[data-testid="caret"], [aria-label*="More" i], [aria-label*="更多"]');
-    if (!menuBtn) return false;
-    menuBtn.click();
-    await wait(500);
-
-    var patterns = [
-      new RegExp("(Block|屏蔽|封锁|ブロック).*" + cleanHandle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
-      /^(Block|屏蔽|封锁|ブロック)$/i,
-      /(Block|屏蔽|封锁|ブロック)/i
-    ];
+  function wait(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+  async function autoBlock(article, handle) {
+    var clean = handle.replace("@", "");
+    var menu = article.querySelector('[data-testid="caret"], [aria-label*="More" i]');
+    if (!menu) return;
+    menu.click(); await wait(500);
     var items = document.querySelectorAll('[role="menuitem"]');
     var blockItem = null;
-    for (var i = 0; i < patterns.length && !blockItem; i++) {
-      items.forEach(function(item) {
-        if (patterns[i].test((item.innerText || "").replace(/\s+/g, " ").trim())) blockItem = item;
-      });
-    }
-    if (!blockItem) { document.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape",bubbles:true})); return false; }
-    blockItem.click();
-    await wait(500);
-
-    var buttons = document.querySelectorAll('[role="dialog"] [role="button"]');
-    var confirmBtn = null;
-    buttons.forEach(function(b) {
-      if (/^(Block|屏蔽|封锁|ブロック)$/i.test((b.innerText||"").trim())) confirmBtn = b;
+    [new RegExp("(Block|屏蔽|封锁).*" + clean.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+     /^(Block|屏蔽|封锁)$/i, /(Block|屏蔽|封锁)/i].forEach(function(p) {
+      if (!blockItem) items.forEach(function(it) { if (p.test((it.innerText||"").replace(/\s+/g," ").trim())) blockItem = it; });
     });
-    if (!confirmBtn) { document.dispatchEvent(new KeyboardEvent("keydown", {key:"Escape",bubbles:true})); return false; }
-    confirmBtn.click();
-
-    chrome.runtime.sendMessage({ type: "XHB2_BLOCKED", handle: handle });
-    return true;
+    if (!blockItem) { document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true})); return; }
+    blockItem.click(); await wait(500);
+    var btns = document.querySelectorAll('[role="dialog"] [role="button"]');
+    var confirm = null;
+    btns.forEach(function(b) { if (/^(Block|屏蔽|封锁)$/i.test((b.innerText||"").trim())) confirm = b; });
+    if (!confirm) { document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true})); return; }
+    confirm.click();
   }
 
-  // ── Main processing ──
+  // ── Check if blocked ──
+  function isBlocked(handle) {
+    var h = (handle || "").toLowerCase().replace(/^@/, "");
+    return blockedHandles.has(h) || (db.accounts[h] && db.accounts[h].blocked);
+  }
+
+  // ── Process article ──
   function processArticle(article) {
-    if (article.hasAttribute(PROCESSED)) return;
-    article.setAttribute(PROCESSED, "1");
+    if (article.hasAttribute("data-xhb2")) return;
+    article.setAttribute("data-xhb2", "1");
     ensureBlockBtn(article);
 
-    var text = getArticleText(article);
+    var text = getText(article);
     var profile = getProfile(article);
     if (!text) return;
 
-    if (!isPureText(article)) {
-      clearMask(article);
+    // Already blocked → auto-mask
+    if (isBlocked(profile.handle)) {
+      applyMask(article, "account-db");
       return;
     }
 
-    // Async classification
-    autoClassify(article, text, profile);
+    // Media check — skip if has images/video/cards (not pure text spam)
+    var textNode = article.querySelector(TEXT);
+    var media = article.querySelector('[data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="card.wrapper"]');
+    if (media && textNode && !textNode.contains(media)) return;
   }
 
   function scanPage() {
-    document.querySelectorAll(ARTICLE_SEL).forEach(processArticle);
+    document.querySelectorAll(ARTICLE).forEach(processArticle);
   }
 
   function schedule() {
     if (scheduled) return;
     scheduled = true;
-    requestAnimationFrame(function() {
-      scheduled = false;
-      scanPage();
-    });
-  }
-
-  async function loadConfig() {
-    config = await new Promise(function(r) {
-      chrome.storage.local.get("xhb2-config", function(d) { r(d["xhb2-config"] || {}); });
-    });
-    schedule();
+    requestAnimationFrame(function() { scheduled = false; scanPage(); });
   }
 
   function startObserver() {
-    observer = new MutationObserver(function(mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        if (mutations[i].addedNodes.length || mutations[i].removedNodes.length) {
-          schedule(); break;
-        }
+    observer = new MutationObserver(function(ms) {
+      for (var i = 0; i < ms.length; i++) {
+        if (ms[i].addedNodes.length) { schedule(); break; }
       }
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
   chrome.storage.onChanged.addListener(function(changes) {
-    if (changes["xhb2-config"]) loadConfig();
+    if (changes[STORAGE] || changes[BLOCKED]) loadState();
   });
 
-  loadConfig();
+  loadState();
   startObserver();
 })();
