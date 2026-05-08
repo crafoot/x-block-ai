@@ -124,29 +124,53 @@
     el.statVocab.textContent = s.vocabulary || 0;
   }
 
-  // Export → via messaging (need background for export)
+  // Export → read directly from storage
   el.btnExport.addEventListener("click", async function() {
-    var r = await new Promise(function(resolve) {
-      chrome.runtime.sendMessage({ type: "XHB2_EXPORT" }, function(v) { resolve(v); });
-    });
-    if (!r || !r.ok) { toast("导出失败", false); return; }
+    var raw = await chrome.storage.local.get("xhb2-db");
+    var db = raw["xhb2-db"] || {};
+    var json = JSON.stringify(db, null, 2);
     var a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([r.data], { type: "application/json" }));
+    a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
     a.download = "xblock2-db-" + new Date().toISOString().slice(0,10) + ".json";
     a.click();
-    toast("已导出", true);
+    toast("已导出 " + Object.keys(db.accounts||{}).length + " 账号", true);
   });
 
   el.btnImport.addEventListener("click", function() { el.importFile.click(); });
   el.importFile.addEventListener("change", async function(e) {
     var file = e.target.files[0]; if (!file) return;
-    var text = await file.text();
-    var r = await new Promise(function(resolve) {
-      chrome.runtime.sendMessage({ type: "XHB2_IMPORT", data: text }, function(v) { resolve(v); });
-    });
+    try {
+      var text = await file.text();
+      var incoming = JSON.parse(text);
+      if (!incoming.accounts) throw new Error("Invalid format");
+      
+      // Read current DB, merge, write back
+      var raw = await chrome.storage.local.get("xhb2-db");
+      var current = raw["xhb2-db"] || { accounts: {}, bayes: { spamCount: 0, hamCount: 0, words: {} } };
+      
+      var added = 0;
+      Object.values(incoming.accounts).forEach(function(acc) {
+        var h = (acc.handle || "").toLowerCase().replace(/^@/, "");
+        if (h && !current.accounts[h]) { current.accounts[h] = acc; added++; }
+      });
+      
+      if (incoming.bayes) {
+        current.bayes.spamCount += incoming.bayes.spamCount || 0;
+        current.bayes.hamCount += incoming.bayes.hamCount || 0;
+        Object.entries(incoming.bayes.words || {}).forEach(function(e) {
+          if (!current.bayes.words[e[0]]) current.bayes.words[e[0]] = { spam: 0, ham: 0 };
+          current.bayes.words[e[0]].spam += e[1].spam || 0;
+          current.bayes.words[e[0]].ham += e[1].ham || 0;
+        });
+      }
+      
+      await chrome.storage.local.set({ "xhb2-db": current });
+      toast("导入 " + added + " 个账号", true);
+      loadStats();
+    } catch(err) {
+      toast("导入失败: " + err.message, false);
+    }
     el.importFile.value = "";
-    if (r && r.ok) { toast("导入 " + r.count + " 个账号", true); loadStats(); }
-    else { toast("导入失败", false); }
   });
 
   loadConfig(); loadStats();
