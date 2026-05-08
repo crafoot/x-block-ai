@@ -11,6 +11,12 @@
     zhipu:     { endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", model: "glm-4-flash" }
   };
 
+  var DEFAULT_CONFIG = {
+    llmEndpoint: "", llmApiKey: "", llmModel: "gpt-4o-mini",
+    autoBlock: true, useLLM: true,
+    bayesMinConfidence: 0.82, llmMinConfidence: 0.55
+  };
+
   var el = {
     statAccounts: $("statAccounts"), statBlocked: $("statBlocked"), statVocab: $("statVocab"),
     btnExport: $("btnExport"), btnImport: $("btnImport"), importFile: $("importFile"),
@@ -20,10 +26,6 @@
     btnSave: $("btnSave"), toast: $("toast")
   };
 
-  function send(msg) {
-    return new Promise(function(r) { chrome.runtime.sendMessage(msg, function(v) { r(v); }); });
-  }
-
   function toast(text, ok) {
     var t = el.toast;
     t.textContent = text;
@@ -31,6 +33,29 @@
     t.style.opacity = "1";
     clearTimeout(t._tid);
     t._tid = setTimeout(function() { t.style.opacity = "0"; }, 2000);
+  }
+
+  async function getConfig() {
+    var raw = await chrome.storage.local.get("xhb2-config");
+    var cfg = raw["xhb2-config"] || {};
+    Object.keys(DEFAULT_CONFIG).forEach(function(k) {
+      if (cfg[k] === undefined) cfg[k] = DEFAULT_CONFIG[k];
+    });
+    return cfg;
+  }
+
+  async function saveConfig(cfg) {
+    await chrome.storage.local.set({ "xhb2-config": cfg });
+  }
+
+  async function getStats() {
+    var raw = await chrome.storage.local.get("xhb2-db");
+    var db = raw["xhb2-db"] || {};
+    var accounts = db.accounts || {};
+    var keys = Object.keys(accounts);
+    var blocked = keys.filter(function(k) { return accounts[k].blocked; }).length;
+    var vocab = db.bayes && db.bayes.words ? Object.keys(db.bayes.words).length : 0;
+    return { accounts: keys.length, blocked: blocked, vocabulary: vocab };
   }
 
   // Provider change → fill endpoint + model
@@ -51,28 +76,32 @@
     el.btnSave.textContent = "⏳ 保存中...";
     el.btnSave.disabled = true;
 
-    var cfg = await send({ type: "XHB2_GET_CONFIG" });
-    cfg.llmEndpoint = el.llmEndpoint.value.trim();
-    cfg.llmApiKey = el.llmApiKey.value.trim();
-    cfg.llmModel = el.llmModel.value.trim() || "gpt-4o-mini";
-    cfg.bayesMinConfidence = parseInt(el.bayesThreshold.value) / 100;
-
-    await send({ type: "XHB2_SAVE_CONFIG", config: cfg });
-    toast("✅ 配置已保存", true);
+    try {
+      var cfg = await getConfig();
+      cfg.llmEndpoint = el.llmEndpoint.value.trim();
+      cfg.llmApiKey = el.llmApiKey.value.trim();
+      cfg.llmModel = el.llmModel.value.trim() || "gpt-4o-mini";
+      cfg.bayesMinConfidence = parseInt(el.bayesThreshold.value) / 100;
+      await saveConfig(cfg);
+      toast("✅ 配置已保存", true);
+      updatePipeline();
+    } catch(e) {
+      toast("❌ 保存失败: " + e.message, false);
+    }
     el.btnSave.textContent = "💾 保存配置";
     el.btnSave.disabled = false;
-    updatePipeline(cfg);
   });
 
-  function updatePipeline(cfg) {
-    var parts = ["① 账号库"];
-    parts.push("② 贝叶斯≥" + (cfg.bayesMinConfidence || 0.82).toFixed(2));
-    parts.push(cfg.llmEndpoint ? "③ LLM(" + (cfg.llmModel||"?") + ")" : "③ 仅本地");
-    el.pipelineInfo.textContent = parts.join(" → ");
+  function updatePipeline() {
+    getConfig().then(function(cfg) {
+      var parts = ["① 账号库", "② 贝叶斯≥" + (cfg.bayesMinConfidence || 0.82).toFixed(2)];
+      parts.push(cfg.llmEndpoint ? "③ LLM(" + (cfg.llmModel||"?") + ")" : "③ 仅本地");
+      el.pipelineInfo.textContent = parts.join(" → ");
+    });
   }
 
   async function loadConfig() {
-    var c = await send({ type: "XHB2_GET_CONFIG" }) || {};
+    var c = await getConfig();
     el.llmEndpoint.value = c.llmEndpoint || "";
     el.llmApiKey.value = c.llmApiKey || "";
     el.llmModel.value = c.llmModel || "";
@@ -82,24 +111,24 @@
     // Detect preset
     var matched = false;
     Object.entries(PRESETS).forEach(function(e) {
-      if (e[1].endpoint === c.llmEndpoint && e[1].model === c.llmModel) {
-        el.provider.value = e[0]; matched = true;
-      }
+      if (e[1].endpoint === c.llmEndpoint) { el.provider.value = e[0]; matched = true; }
     });
     if (!matched) el.provider.value = "";
-
-    updatePipeline(c);
+    updatePipeline();
   }
 
   async function loadStats() {
-    var s = await send({ type: "XHB2_GET_STATS" }) || {};
+    var s = await getStats();
     el.statAccounts.textContent = s.accounts || 0;
     el.statBlocked.textContent = s.blocked || 0;
     el.statVocab.textContent = s.vocabulary || 0;
   }
 
+  // Export → via messaging (need background for export)
   el.btnExport.addEventListener("click", async function() {
-    var r = await send({ type: "XHB2_EXPORT" });
+    var r = await new Promise(function(resolve) {
+      chrome.runtime.sendMessage({ type: "XHB2_EXPORT" }, function(v) { resolve(v); });
+    });
     if (!r || !r.ok) { toast("导出失败", false); return; }
     var a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([r.data], { type: "application/json" }));
@@ -112,7 +141,9 @@
   el.importFile.addEventListener("change", async function(e) {
     var file = e.target.files[0]; if (!file) return;
     var text = await file.text();
-    var r = await send({ type: "XHB2_IMPORT", data: text });
+    var r = await new Promise(function(resolve) {
+      chrome.runtime.sendMessage({ type: "XHB2_IMPORT", data: text }, function(v) { resolve(v); });
+    });
     el.importFile.value = "";
     if (r && r.ok) { toast("导入 " + r.count + " 个账号", true); loadStats(); }
     else { toast("导入失败", false); }
