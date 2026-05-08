@@ -5,82 +5,74 @@
 <title>X-block AI</title>
 <style>
 *{box-sizing:border-box;margin:0}body{width:380px;padding:14px;font-family:-apple-system,sans-serif;font-size:13px;background:#f8fafc;color:#1e293b}
-h2{font-size:14px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+h2{font-size:14px;margin-bottom:8px}
 .section{background:#fff;border-radius:10px;padding:12px;margin-bottom:10px;border:1px solid #e2e8f0}
 .stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
 .stat{background:#f1f5f9;padding:8px 6px;border-radius:8px;text-align:center}
 .stat-val{font-size:20px;font-weight:700;line-height:1.1}
 .stat-label{font-size:10px;color:#64748b;margin-top:2px}
-.row{display:flex;gap:8px;margin-bottom:6px}
+.row{display:flex;gap:8px;margin-bottom:6px;align-items:center}
 label{font-weight:600;font-size:11px;color:#64748b;display:block;margin-bottom:2px}
 input,select{width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11px}
 button{padding:6px 12px;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600}
-.btn-primary{background:#0f172a;color:#fff}
-.btn-outline{background:#fff;color:#334155;border:1px solid #cbd5e1}
-.btn-sm{padding:3px 6px;font-size:10px}
-.status{font-size:10px;padding:3px 6px;border-radius:4px}
-.status-ok{background:#dcfce7;color:#166534}
-summary{font-size:11px;color:#64748b;cursor:pointer;margin-top:6px}
-.pipeline{font-size:10px;color:#94a3b8;line-height:1.6;margin-top:6px}
+.btn-primary{background:#0f172a;color:#fff;width:100%;padding:8px}
+.btn-sm{padding:3px 6px;font-size:10px;background:#fff;color:#334155;border:1px solid #cbd5e1}
+.btn-danger{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
+.toast{position:fixed;top:10px;right:10px;z-index:99;padding:8px 14px;border-radius:8px;font-size:12px;font-weight:600;transition:opacity .3s}
+.toast-ok{background:#dcfce7;color:#166534}
+.toast-err{background:#fee2e2;color:#991b1b}
+summary{font-size:11px;color:#64748b;cursor:pointer;margin:6px 0}
+.pipeline{font-size:10px;color:#94a3b8;line-height:1.6;margin-top:4px}
+.badge{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;margin-left:4px}
+.badge-on{background:#dcfce7;color:#166534}
+.badge-off{background:#f1f5f9;color:#94a3b8}
 </style>
 </head>
 <body>
 
+<div id="toast" class="toast" style="opacity:0"></div>
+
 <div class="section">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-    <h2 style="margin:0">🧠 智能引擎</h2>
-    <span id="pipelineStatus" style="font-size:10px;color:#94a3b8"></span>
-  </div>
-  <div class="pipeline" id="pipelineInfo">三层过滤: 账号库→本地贝叶斯→LLM</div>
+  <h2>🧠 X-block AI</h2>
+  <div class="pipeline" id="pipelineInfo">① 账号库 → ② 本地贝叶斯 → ③ LLM</div>
 </div>
 
 <div class="section">
   <h2>📊 知识库</h2>
   <div class="stats">
-    <div class="stat"><div class="stat-val" id="statAccounts">0</div><div class="stat-label">账号库</div></div>
+    <div class="stat"><div class="stat-val" id="statAccounts">0</div><div class="stat-label">账号</div></div>
     <div class="stat"><div class="stat-val" id="statBlocked">0</div><div class="stat-label">已屏蔽</div></div>
     <div class="stat"><div class="stat-val" id="statVocab">0</div><div class="stat-label">特征词</div></div>
   </div>
-  <div class="stats" style="margin-top:6px">
-    <div class="stat"><div class="stat-val" id="statSpam">0</div><div class="stat-label">垃圾样本</div></div>
-    <div class="stat"><div class="stat-val" id="statHam">0</div><div class="stat-label">正常样本</div></div>
-    <div class="stat"><div class="stat-val" id="statAuto">0</div><div class="stat-label">自动识别</div></div>
-  </div>
-  <div class="row" style="margin-top:8px">
-    <button id="btnExport" class="btn-outline btn-sm">📤导出</button>
-    <button id="btnImport" class="btn-outline btn-sm">📥导入</button>
+  <div style="margin-top:8px;display:flex;gap:6px">
+    <button id="btnExport" class="btn-sm">📤导出</button>
+    <button id="btnImport" class="btn-sm">📥导入</button>
   </div>
   <input id="importFile" type="file" accept=".json" hidden>
 </div>
 
-<details class="section">
-  <summary>⚙️ LLM 配置 & 阈值</summary>
-  <div style="margin-top:8px">
-    <label>Endpoint (OpenAI 兼容)</label>
-    <input id="llmEndpoint" placeholder="https://api.openai.com/v1/chat/completions" style="margin-bottom:4px">
-    <label>API Key</label>
-    <input id="llmApiKey" type="password" placeholder="sk-..." style="margin-bottom:4px">
-    <label>Model</label>
-    <input id="llmModel" placeholder="gpt-4o-mini" style="margin-bottom:6px">
-    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-      <input id="useLLM" type="checkbox" checked> 启用 LLM (Tier 3)
-    </label>
-    <label>贝叶斯自动屏蔽阈值</label>
-    <div class="row">
-      <input id="bayesThreshold" type="range" min="60" max="95" value="82" style="flex:1">
-      <span id="bayesLabel" style="font-size:11px;min-width:32px">0.82</span>
-    </div>
-    <label>LLM 触发阈值 (低于此不调 LLM)</label>
-    <div class="row">
-      <input id="llmThreshold" type="range" min="30" max="80" value="55" style="flex:1">
-      <span id="llmLabel" style="font-size:11px;min-width:32px">0.55</span>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <button id="btnSaveConfig" class="btn-primary btn-sm">保存配置</button>
-      <span id="configStatus"></span>
-    </div>
-  </div>
-</details>
+<div class="section">
+  <h2>⚙️ LLM 配置</h2>
+  <label>供应商</label>
+  <select id="provider" style="margin-bottom:6px">
+    <option value="">自定义...</option>
+    <option value="deepseek">DeepSeek</option>
+    <option value="openai">OpenAI</option>
+    <option value="openrouter">OpenRouter</option>
+    <option value="groq">Groq</option>
+    <option value="siliconflow">硅基流动 (SiliconFlow)</option>
+    <option value="zhipu">智谱 GLM</option>
+  </select>
+  <label>Endpoint</label>
+  <input id="llmEndpoint" placeholder="https://api.openai.com/v1/chat/completions" style="margin-bottom:4px">
+  <label>API Key</label>
+  <input id="llmApiKey" type="password" placeholder="sk-..." style="margin-bottom:4px">
+  <label>Model</label>
+  <input id="llmModel" placeholder="gpt-4o-mini" style="margin-bottom:6px">
+  <label>贝叶斯自动屏蔽阈值 <span id="bayesLabel" style="font-weight:400">0.82</span></label>
+  <input id="bayesThreshold" type="range" min="60" max="95" value="82" style="width:100%;margin-bottom:6px">
+  <button id="btnSave" class="btn-primary">💾 保存配置</button>
+</div>
 
 <script src="shared.js"></script>
 <script src="popup.js"></script>
