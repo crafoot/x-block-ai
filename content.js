@@ -147,10 +147,30 @@
       if (!blockItem) items.forEach(function(it) { if (p.test((it.innerText||"").replace(/\s+/g," ").trim())) blockItem = it; });
     });
     if (!blockItem) { document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true})); return; }
-    blockItem.click(); await wait(500);
-    var btns = document.querySelectorAll('[role="dialog"] [role="button"]');
+    blockItem.click(); await wait(600);
+
+    // Try multiple strategies to find confirm button
     var confirm = null;
-    btns.forEach(function(b) { if (/^(Block|屏蔽|封锁)$/i.test((b.innerText||"").trim())) confirm = b; });
+    var allBtns = document.querySelectorAll('[role="dialog"] [role="button"], [data-testid="confirmationSheetConfirm"], [data-testid="confirmationSheetDialog"] [role="button"]');
+    
+    // Strategy 1: exact text match
+    allBtns.forEach(function(b) { if (/^(Block|屏蔽|封锁|ブロック)$/i.test((b.innerText||"").trim())) confirm = b; });
+    
+    // Strategy 2: partial text match
+    if (!confirm) {
+      allBtns.forEach(function(b) { if (/(Block|屏蔽|封锁|ブロック)/i.test((b.innerText||"").trim())) confirm = b; });
+    }
+    
+    // Strategy 3: bright/bold/primary button (usually the destructive action)
+    if (!confirm) {
+      var dialog = document.querySelector('[role="dialog"]');
+      if (dialog) {
+        var dialogBtns = dialog.querySelectorAll('[role="button"]');
+        // Last button in dialog is usually confirm
+        if (dialogBtns.length > 0) confirm = dialogBtns[dialogBtns.length - 1];
+      }
+    }
+
     if (!confirm) { document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true})); return; }
     confirm.click();
   }
