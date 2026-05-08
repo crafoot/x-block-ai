@@ -14,15 +14,18 @@
   var DEFAULT_CONFIG = {
     llmEndpoint: "", llmApiKey: "", llmModel: "gpt-4o-mini",
     autoBlock: true, useLLM: true,
-    bayesMinConfidence: 0.82, llmMinConfidence: 0.55
+    bayesMinConfidence: 0.82, llmMinConfidence: 0.55, llmReviewMargin: 0.12
   };
 
   var el = {
     statAccounts: $("statAccounts"), statBlocked: $("statBlocked"), statVocab: $("statVocab"),
-    btnExport: $("btnExport"), btnImport: $("btnImport"), importFile: $("importFile"),
-    pipelineInfo: $("pipelineInfo"),
+    btnExport: $("btnExport"), btnImport: $("btnImport"), btnDistill: $("btnDistill"), btnReset: $("btnReset"), importFile: $("importFile"),
+    pipelineInfo: $("pipelineInfo"), learnInfo: $("learnInfo"), dataView: $("dataView"),
     provider: $("provider"), llmEndpoint: $("llmEndpoint"), llmApiKey: $("llmApiKey"), llmModel: $("llmModel"),
+    autoBlock: $("autoBlock"), useLLM: $("useLLM"),
     bayesThreshold: $("bayesThreshold"), bayesLabel: $("bayesLabel"),
+    llmThreshold: $("llmThreshold"), llmLabel: $("llmLabel"),
+    reviewMargin: $("reviewMargin"), reviewLabel: $("reviewLabel"),
     btnSave: $("btnSave"), toast: $("toast")
   };
 
@@ -46,6 +49,9 @@
 
   async function saveConfig(cfg) {
     await chrome.storage.local.set({ "xhb2-config": cfg });
+    try {
+      chrome.runtime.sendMessage({ type: "XHB2_SAVE_CONFIG", config: cfg }, function() {});
+    } catch(e) {}
   }
 
   async function getStats() {
@@ -55,7 +61,44 @@
     var keys = Object.keys(accounts);
     var blocked = keys.filter(function(k) { return accounts[k].blocked; }).length;
     var vocab = db.bayes && db.bayes.words ? Object.keys(db.bayes.words).length : 0;
-    return { accounts: keys.length, blocked: blocked, vocabulary: vocab };
+    return {
+      accounts: keys.length,
+      blocked: blocked,
+      vocabulary: vocab,
+      samples: (db.samples || []).length,
+      aiRules: (db.aiRules || []).length,
+      aiRulesUpdatedAt: db.aiRulesUpdatedAt || ""
+    };
+  }
+
+  function escapeHTML(text) {
+    return String(text || "").replace(/[&<>"']/g, function(ch) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch];
+    });
+  }
+
+  async function loadDataView() {
+    var raw = await chrome.storage.local.get("xhb2-db");
+    var db = raw["xhb2-db"] || {};
+    var accounts = Object.values(db.accounts || {}).filter(function(a) { return a.blocked; }).slice(-8).reverse();
+    var samples = (db.samples || []).slice(-8).reverse();
+    var rules = (db.aiRules || []).slice(0, 5);
+    var html = "";
+    html += '<div class="data-row"><div class="data-meta">最近屏蔽账号</div>' +
+      (accounts.length ? accounts.map(function(a) {
+        return '<div class="data-text">' + escapeHTML(a.handle) + ' ' + escapeHTML(a.displayName || "") + '</div>';
+      }).join("") : '<div class="data-text">暂无</div>') + '</div>';
+    html += '<div class="data-row"><div class="data-meta">最近样本</div>' +
+      (samples.length ? samples.map(function(s) {
+        return '<div class="data-text">[' + escapeHTML(s.label) + '/' + escapeHTML(s.source) + '/w' + escapeHTML(s.weight || 1) + '] ' +
+          escapeHTML(s.handle) + ' ' + escapeHTML(s.displayName) + '：' + escapeHTML(s.text) + '</div>';
+      }).join("") : '<div class="data-text">暂无</div>') + '</div>';
+    html += '<div class="data-row"><div class="data-meta">AI规则</div>' +
+      (rules.length ? rules.map(function(r) {
+        var keys = [].concat(r.textAny || [], r.nameAny || [], r.handleAny || [], r.anyAny || []).join(" / ");
+        return '<div class="data-text">' + escapeHTML(r.title || r.id) + '：' + escapeHTML(keys) + '</div>';
+      }).join("") : '<div class="data-text">暂无</div>') + '</div>';
+    el.dataView.innerHTML = html;
   }
 
   // Provider change → fill endpoint + model
@@ -71,6 +114,14 @@
     el.bayesLabel.textContent = (parseInt(el.bayesThreshold.value) / 100).toFixed(2);
   });
 
+  el.llmThreshold.addEventListener("input", function() {
+    el.llmLabel.textContent = (parseInt(el.llmThreshold.value) / 100).toFixed(2);
+  });
+
+  el.reviewMargin.addEventListener("input", function() {
+    el.reviewLabel.textContent = (parseInt(el.reviewMargin.value) / 100).toFixed(2);
+  });
+
   // Save config
   el.btnSave.addEventListener("click", async function() {
     el.btnSave.textContent = "⏳ 保存中...";
@@ -81,7 +132,11 @@
       cfg.llmEndpoint = el.llmEndpoint.value.trim();
       cfg.llmApiKey = el.llmApiKey.value.trim();
       cfg.llmModel = el.llmModel.value.trim() || "gpt-4o-mini";
+      cfg.autoBlock = el.autoBlock.checked;
+      cfg.useLLM = el.useLLM.checked;
       cfg.bayesMinConfidence = parseInt(el.bayesThreshold.value) / 100;
+      cfg.llmMinConfidence = parseInt(el.llmThreshold.value) / 100;
+      cfg.llmReviewMargin = parseInt(el.reviewMargin.value) / 100;
       await saveConfig(cfg);
       toast("✅ 配置已保存", true);
       updatePipeline();
@@ -94,8 +149,9 @@
 
   function updatePipeline() {
     getConfig().then(function(cfg) {
-      var parts = ["① 账号库", "② 贝叶斯≥" + (cfg.bayesMinConfidence || 0.82).toFixed(2)];
-      parts.push(cfg.llmEndpoint ? "③ LLM(" + (cfg.llmModel||"?") + ")" : "③ 仅本地");
+      var parts = ["① 账号库", "② 黄推规则", "③ 贝叶斯≥" + (cfg.bayesMinConfidence || 0.82).toFixed(2)];
+      parts.push(cfg.useLLM && cfg.llmEndpoint ? "④ 边界±" + (cfg.llmReviewMargin || 0.12).toFixed(2) + "→LLM≥" + (cfg.llmMinConfidence || 0.55).toFixed(2) : "④ 不调 LLM");
+      parts.push(cfg.autoBlock === false ? "仅入库" : "自动屏蔽");
       el.pipelineInfo.textContent = parts.join(" → ");
     });
   }
@@ -105,8 +161,14 @@
     el.llmEndpoint.value = c.llmEndpoint || "";
     el.llmApiKey.value = c.llmApiKey || "";
     el.llmModel.value = c.llmModel || "";
+    el.autoBlock.checked = c.autoBlock !== false;
+    el.useLLM.checked = c.useLLM !== false;
     el.bayesThreshold.value = Math.round((c.bayesMinConfidence || 0.82) * 100);
     el.bayesLabel.textContent = (c.bayesMinConfidence || 0.82).toFixed(2);
+    el.llmThreshold.value = Math.round((c.llmMinConfidence || 0.55) * 100);
+    el.llmLabel.textContent = (c.llmMinConfidence || 0.55).toFixed(2);
+    el.reviewMargin.value = Math.round((c.llmReviewMargin || 0.12) * 100);
+    el.reviewLabel.textContent = (c.llmReviewMargin || 0.12).toFixed(2);
 
     // Detect preset
     var matched = false;
@@ -122,6 +184,9 @@
     el.statAccounts.textContent = s.accounts || 0;
     el.statBlocked.textContent = s.blocked || 0;
     el.statVocab.textContent = s.vocabulary || 0;
+    el.learnInfo.textContent = "样本 " + (s.samples || 0) + " · AI规则 " + (s.aiRules || 0) +
+      (s.aiRulesUpdatedAt ? " · " + s.aiRulesUpdatedAt.slice(5, 16).replace("T", " ") : "");
+    loadDataView();
   }
 
   // Export → read directly from storage
@@ -137,6 +202,71 @@
   });
 
   el.btnImport.addEventListener("click", function() { el.importFile.click(); });
+  el.btnDistill.addEventListener("click", async function() {
+    el.btnDistill.textContent = "分析中...";
+    el.btnDistill.disabled = true;
+    el.learnInfo.textContent = "AI规则分析中，最多等待 60 秒...";
+    try {
+      var cfg = await getConfig();
+      cfg.llmEndpoint = el.llmEndpoint.value.trim();
+      cfg.llmApiKey = el.llmApiKey.value.trim();
+      cfg.llmModel = el.llmModel.value.trim() || "gpt-4o-mini";
+      cfg.autoBlock = el.autoBlock.checked;
+      cfg.useLLM = el.useLLM.checked;
+      cfg.bayesMinConfidence = parseInt(el.bayesThreshold.value) / 100;
+      cfg.llmMinConfidence = parseInt(el.llmThreshold.value) / 100;
+      cfg.llmReviewMargin = parseInt(el.reviewMargin.value) / 100;
+      await saveConfig(cfg);
+    } catch(e) {
+      el.btnDistill.textContent = "AI分析规则";
+      el.btnDistill.disabled = false;
+      toast("配置保存失败: " + e.message, false);
+      return;
+    }
+    var finished = false;
+    var watchdog = setTimeout(function() {
+      if (finished) return;
+      finished = true;
+      el.btnDistill.textContent = "AI分析规则";
+      el.btnDistill.disabled = false;
+      toast("分析超时，请检查 API 或稍后重试", false);
+      loadStats();
+    }, 60000);
+    chrome.runtime.sendMessage({ type: "XHB2_DISTILL_RULES" }, function(res) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(watchdog);
+      el.btnDistill.textContent = "AI分析规则";
+      el.btnDistill.disabled = false;
+      if (chrome.runtime.lastError) {
+        toast("分析失败: " + chrome.runtime.lastError.message, false);
+        loadStats();
+        return;
+      }
+      if (res && res.ok) {
+        toast("规则 " + res.rules + " 条，释放 " + (res.released || 0) + " 个，保护 " + (res.protected || 0) + " 个", true);
+        loadStats();
+      } else {
+        toast("分析失败: " + (res && res.error || "unknown"), false);
+      }
+    });
+  });
+
+  el.btnReset.addEventListener("click", async function() {
+    if (!confirm("清空账号库、屏蔽列表和本地学习特征？")) return;
+    try {
+      await chrome.storage.local.set({
+        "xhb2-db": { accounts: {}, bayes: { spamCount: 0, hamCount: 0, words: {} }, samples: [], aiRules: [] },
+        "xhb2-blocked": []
+      });
+      chrome.runtime.sendMessage({ type: "XHB2_RESET_DB" }, function() {});
+      toast("学习库已清空", true);
+      loadStats();
+    } catch(err) {
+      toast("清空失败: " + err.message, false);
+    }
+  });
+
   el.importFile.addEventListener("change", async function(e) {
     var file = e.target.files[0]; if (!file) return;
     try {
@@ -146,7 +276,12 @@
       
       // Read current DB, merge, write back
       var raw = await chrome.storage.local.get("xhb2-db");
-      var current = raw["xhb2-db"] || { accounts: {}, bayes: { spamCount: 0, hamCount: 0, words: {} } };
+      var current = raw["xhb2-db"] || { accounts: {}, bayes: { spamCount: 0, hamCount: 0, words: {} }, samples: [], aiRules: [] };
+      current.accounts = current.accounts || {};
+      current.bayes = current.bayes || { spamCount: 0, hamCount: 0, words: {} };
+      current.bayes.words = current.bayes.words || {};
+      current.samples = current.samples || [];
+      current.aiRules = current.aiRules || [];
       
       var added = 0;
       Object.values(incoming.accounts).forEach(function(acc) {
@@ -163,8 +298,17 @@
           current.bayes.words[e[0]].ham += e[1].ham || 0;
         });
       }
+
+      if (Array.isArray(incoming.samples)) {
+        current.samples = current.samples.concat(incoming.samples).slice(-500);
+      }
+      if (Array.isArray(incoming.aiRules) && !current.aiRules.length) {
+        current.aiRules = incoming.aiRules;
+        current.aiRulesUpdatedAt = incoming.aiRulesUpdatedAt || "";
+      }
       
-      await chrome.storage.local.set({ "xhb2-db": current });
+      var blocked = Object.keys(current.accounts).filter(function(h) { return current.accounts[h] && current.accounts[h].blocked; });
+      await chrome.storage.local.set({ "xhb2-db": current, "xhb2-blocked": blocked });
       toast("导入 " + added + " 个账号", true);
       loadStats();
     } catch(err) {

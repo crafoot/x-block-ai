@@ -6,24 +6,88 @@
   var NAME = '[data-testid="User-Name"]';
   var STORAGE = "xhb2-db";
   var BLOCKED = "xhb2-blocked";
+  var MAX_FEATURES = 1500;
 
-  var config = { autoBlock: true, bayesMinConfidence: 0.82, llmMinConfidence: 0.55, useLLM: true };
+  var config = { autoBlock: true, bayesMinConfidence: 0.82, llmMinConfidence: 0.55, llmReviewMargin: 0.12, useLLM: true };
   var blockedHandles = new Set();
   var db = null;
   var observer = null;
   var scheduled = false;
   var blockQueue = Promise.resolve();
   var classifying = new Set();
+  var prunedOnce = false;
+
+  var AI_RULES = [
+    {
+      id: "adult-direct",
+      minScore: 6,
+      signals: [
+        { field: "any", weight: 6, pattern: /(外围|援交|楼凤|裸聊|卖淫|约炮|口交|成人交友|onlyfans|fansly|escort|nudes?)/i }
+      ]
+    },
+    {
+      id: "profile-funnel",
+      minScore: 7,
+      signals: [
+        { field: "text", weight: 4, pattern: /(主页|私信|加v|加微|电报|telegram|tg)/i },
+        { field: "text", weight: 3, pattern: /(福利|资源|视频|写真|可约|上门|空降|裸聊)/i },
+        { field: "name", weight: 2, pattern: /(福利|约|资源|视频|裸|骚|成人)/i }
+      ]
+    },
+    {
+      id: "sexual-template",
+      minScore: 6,
+      signals: [
+        { field: "text", weight: 4, pattern: /(她好(看|骚|涩)|比她(好看|骚)|没她(好看|骚)|我不行了)/ },
+        { field: "text", weight: 2, pattern: /(主页|私信|打了半天|刷了半天|看主页)/ }
+      ]
+    },
+    {
+      id: "nearby-service",
+      minScore: 6,
+      signals: [
+        { field: "text", weight: 4, pattern: /(同城|附近|本地)/ },
+        { field: "text", weight: 3, pattern: /(可约|上门|空降|服务|约|啪)/ }
+      ]
+    },
+    {
+      id: "marketing-name",
+      minScore: 6,
+      signals: [
+        { field: "name", weight: 4, pattern: /(互fo|互关|回关|互粉|涨粉|引流|推广|接单|兼职|副业)/i },
+        { field: "any", weight: 2, pattern: /(主页|私信|关注|福利|资源|加v|加微|电报|telegram|tg|合作|推广)/i }
+      ]
+    },
+    {
+      id: "mention-funnel",
+      minScore: 6,
+      signals: [
+        { field: "mentions", weight: 3, pattern: /./ },
+        { field: "any", weight: 3, pattern: /(主页|私信|加v|加微|福利|资源|视频|约|裸|骚|推广|互关|互fo)/i }
+      ]
+    }
+  ];
 
   // ── Load state ──
   async function loadState() {
     var raw = await chrome.storage.local.get([STORAGE, "xhb2-config", BLOCKED]);
     db = raw[STORAGE] || { accounts: {}, bayes: { spamCount: 0, hamCount: 0, words: {} } };
+    db.accounts = db.accounts || {};
+    db.bayes = db.bayes || { spamCount: 0, hamCount: 0, words: {} };
+    db.bayes.words = db.bayes.words || {};
+    db.samples = db.samples || [];
+    db.aiRules = db.aiRules || [];
     var cfg = raw["xhb2-config"] || {};
+    config.autoBlock = cfg.autoBlock !== false;
     config.bayesMinConfidence = cfg.bayesMinConfidence || 0.82;
     config.llmMinConfidence = cfg.llmMinConfidence || 0.55;
-    config.useLLM = cfg.useLLM !== false && !!cfg.llmEndpoint;
+    config.llmReviewMargin = cfg.llmReviewMargin || 0.12;
+    config.useLLM = cfg.useLLM !== false && !!cfg.llmEndpoint && !!cfg.llmApiKey;
     blockedHandles = new Set(raw[BLOCKED] || []);
+    if (!prunedOnce) {
+      prunedOnce = true;
+      if (pruneBayes()) await saveState();
+    }
     schedule();
   }
 
@@ -35,13 +99,134 @@
 
   // ── Bayes ──
   function getFeatures(text) {
-    var cleaned = (text || "").toLowerCase().replace(/\s+/g, " ").trim();
+    var cleaned = (text || "").toLowerCase()
+      .replace(/https?:\/\/\S+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
     if (!cleaned) return [];
     var feats = [];
-    for (var n = 3; n <= 4; n++)
-      for (var i = 0; i <= cleaned.length - n; i++) feats.push(cleaned.slice(i, i + n));
-    cleaned.split(/\s+/).forEach(function(w) { if (w.length >= 2) feats.push("W:" + w); });
-    return Array.from(new Set(feats));
+
+    var handles = cleaned.match(/@[a-z0-9_]{1,15}/g) || [];
+    handles.forEach(function(h) { feats.push("H:" + h.slice(1)); });
+
+    var latin = cleaned.match(/[a-z0-9_]{2,24}/g) || [];
+    latin.forEach(function(w) {
+      if (!/^\d+$/.test(w)) feats.push("W:" + w);
+    });
+
+    var cjk = (cleaned.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) || []).join("");
+    for (var n = 2; n <= 4; n++) {
+      for (var i = 0; i <= cjk.length - n; i++) feats.push("C:" + cjk.slice(i, i + n));
+    }
+
+    return Array.from(new Set(feats)).filter(isValidFeature).slice(0, 180);
+  }
+
+  function isValidFeature(feature) {
+    if (!feature || feature.length > 32 || /\s/.test(feature)) return false;
+    if (/^W:/.test(feature)) return feature.length <= 26 && /^W:[a-z0-9_]+$/.test(feature);
+    if (/^H:/.test(feature)) return feature.length <= 17 && /^H:[a-z0-9_]+$/.test(feature);
+    if (/^C:/.test(feature)) return feature.length >= 4 && feature.length <= 6;
+    return feature.length <= 6;
+  }
+
+  function pruneBayes() {
+    if (!db || !db.bayes || !db.bayes.words) return false;
+    var words = db.bayes.words;
+    var entries = Object.keys(words).filter(isValidFeature).map(function(k) {
+      var v = words[k] || {};
+      return { key: k, value: { spam: v.spam || 0, ham: v.ham || 0 } };
+    });
+    entries.sort(function(a, b) {
+      var as = a.value.spam * 4 + a.value.ham;
+      var bs = b.value.spam * 4 + b.value.ham;
+      return bs - as;
+    });
+    entries = entries.slice(0, MAX_FEATURES);
+    var next = {};
+    entries.forEach(function(e) { next[e.key] = e.value; });
+    var changed = Object.keys(words).length !== Object.keys(next).length;
+    db.bayes.words = next;
+    return changed;
+  }
+
+  function classifyHeuristic(text, profile) {
+    var mentionProfiles = getMentionedProfiles(text, profile);
+    var ctx = {
+      text: (text || "").toLowerCase(),
+      name: (profile && profile.displayName || "").toLowerCase(),
+      handle: (profile && profile.handle || "").toLowerCase(),
+      mentions: mentionProfiles.map(function(p) { return p.handle; }).join(" ").toLowerCase()
+    };
+    ctx.any = [ctx.text, ctx.name, ctx.handle].join(" ");
+    var learned = classifyLearnedRules(ctx);
+    if (learned.spam) return learned;
+    var distilled = classifyAIRules(ctx);
+    if (distilled.spam) return distilled;
+    var haystack = ctx.any;
+    var strong = [
+      /约[^\s]{0,6}(炮|啪|爱)/,
+      /(同城|附近)[^\s]{0,8}(约|上门|空降|可约|服务)/,
+      /(外围|援交|楼凤|裸聊|卖淫|叫床|口交|激情视频|成人交友)/,
+      /(加v|加微|看主页|点主页|私信)[^\s]{0,10}(约|福利|资源|视频|写真|裸聊)/,
+      /(🔞|18\+|onlyfans|telegram|电报)[^\s]{0,16}(福利|裸|约|视频|资源)?/,
+      /(horny|nudes?|sex|escort|sugar\s*(baby|daddy)|onlyfans|fansly)/i
+    ];
+    var weak = [
+      /福利/,
+      /资源/,
+      /私信/,
+      /主页/,
+      /写真/,
+      /嫩妹|少妇|萝莉|御姐|学生妹/,
+      /可约|上门|空降/,
+      /telegram|电报|tg/,
+      /裸|骚|啪|约/
+    ];
+    var weakHits = weak.reduce(function(n, pattern) { return n + (pattern.test(haystack) ? 1 : 0); }, 0);
+    if (strong.some(function(pattern) { return pattern.test(haystack); })) {
+      return { spam: true, conf: 0.96, reason: "yellow-keyword" };
+    }
+    if (weakHits >= 3) return { spam: true, conf: 0.9, reason: "yellow-pattern" };
+    return { spam: false, conf: 0, reason: "" };
+  }
+
+  function keywordHit(value, keywords) {
+    value = value || "";
+    return (keywords || []).some(function(k) {
+      return k && value.indexOf(String(k).toLowerCase()) >= 0;
+    });
+  }
+
+  function classifyLearnedRules(ctx) {
+    var rules = (db && db.aiRules || []).slice(0, 50);
+    for (var i = 0; i < rules.length; i++) {
+      var rule = rules[i] || {};
+      var score = 0;
+      if (keywordHit(ctx.text, rule.textAny)) score += Number(rule.textWeight) || 3;
+      if (keywordHit(ctx.name, rule.nameAny)) score += Number(rule.nameWeight) || 2;
+      if (keywordHit(ctx.handle, rule.handleAny)) score += Number(rule.handleWeight) || 2;
+      if (keywordHit(ctx.any, rule.anyAny)) score += Number(rule.anyWeight) || 2;
+      if (score >= (Number(rule.minScore) || 4)) {
+        return { spam: true, conf: Math.min(0.88, 0.68 + score / 80), reason: "learned-rule:" + (rule.id || "ai") };
+      }
+    }
+    return { spam: false, conf: 0, reason: "" };
+  }
+
+  function classifyAIRules(ctx) {
+    for (var i = 0; i < AI_RULES.length; i++) {
+      var rule = AI_RULES[i];
+      var score = 0;
+      rule.signals.forEach(function(signal) {
+        if (signal.pattern.test(ctx[signal.field] || "")) score += signal.weight;
+      });
+      if (score >= rule.minScore) {
+        var conf = rule.id === "adult-direct" ? 0.96 : Math.min(0.88, 0.68 + score / 80);
+        return { spam: true, conf: conf, reason: "ai-rule:" + rule.id };
+      }
+    }
+    return { spam: false, conf: 0, reason: "" };
   }
 
   function classifyLocal(text) {
@@ -58,16 +243,44 @@
     });
     var max = Math.max(sScore, hScore);
     var prob = Math.exp(sScore - max) / (Math.exp(sScore - max) + Math.exp(hScore - max));
-    return { spam: prob >= 0.5, conf: prob };
+    var spam = prob >= 0.5;
+    return { spam: spam, conf: spam ? prob : 1 - prob, spamProbability: prob };
   }
 
-  function trainLocal(text, isSpam) {
+  function trainLocal(text, isSpam, force) {
     if (!db) return;
+    if (!force && !isSpam && db.bayes.hamCount >= Math.max(30, db.bayes.spamCount * 3)) return;
     if (isSpam) db.bayes.spamCount++; else db.bayes.hamCount++;
     getFeatures(text).forEach(function(f) {
       if (!db.bayes.words[f]) db.bayes.words[f] = { spam: 0, ham: 0 };
       if (isSpam) db.bayes.words[f].spam++; else db.bayes.words[f].ham++;
     });
+    pruneBayes();
+  }
+
+  function getProfileTrainingText(text, profile) {
+    return [
+      profile && profile.displayName || "",
+      profile && profile.handle || "",
+      text || ""
+    ].join(" ").trim();
+  }
+
+  function recordSample(text, profile, label, source, reason, weight) {
+    if (!db) return;
+    db.samples = db.samples || [];
+    db.samples.push({
+      label: label ? "spam" : "ham",
+      source: source || "",
+      reason: reason || "",
+      weight: weight || 1,
+      text: String(text || "").slice(0, 1000),
+      displayName: String(profile && profile.displayName || "").slice(0, 80),
+      handle: String(profile && profile.handle || "").slice(0, 32),
+      mentions: getMentionedProfiles(text, profile).map(function(p) { return p.handle; }).slice(0, 8),
+      at: new Date().toISOString()
+    });
+    if (db.samples.length > 500) db.samples = db.samples.slice(db.samples.length - 500);
   }
 
   // ── Add to account DB ──
@@ -90,12 +303,75 @@
     blockedHandles.add(h);
   }
 
+  function unblockAccount(profile, reason) {
+    var h = (profile.handle || "").toLowerCase().replace(/^@/, "");
+    if (!h || !db.accounts[h]) return;
+    db.accounts[h].blocked = false;
+    db.accounts[h].unblockedAt = new Date().toISOString();
+    db.accounts[h].reasons = Array.from(new Set((db.accounts[h].reasons || []).concat([reason || "restore"])));
+    blockedHandles.delete(h);
+  }
+
+  function getOriginalPosterHandle() {
+    var pathHandle = (location.pathname.match(/^\/([A-Za-z0-9_]{1,15})(?:$|[/?#])/i) || [])[1];
+    if (pathHandle && !/^(home|explore|notifications|messages|i|settings|search)$/i.test(pathHandle)) {
+      return pathHandle.toLowerCase();
+    }
+    var firstArticle = document.querySelector(ARTICLE);
+    var firstProfile = firstArticle ? getProfile(firstArticle) : null;
+    return firstProfile && firstProfile.handle ? firstProfile.handle.toLowerCase().replace(/^@/, "") : "";
+  }
+
+  function isOriginalPostArticle(article) {
+    if (!/\/status\/\d+/.test(location.pathname)) return false;
+    return article === document.querySelector(ARTICLE);
+  }
+
+  function getVisibleCommenterHandles() {
+    var handles = {};
+    document.querySelectorAll(ARTICLE).forEach(function(article) {
+      var profile = getProfile(article);
+      var h = (profile.handle || "").toLowerCase().replace(/^@/, "");
+      if (h) handles[h] = true;
+    });
+    return handles;
+  }
+
+  function getMentionedProfiles(text, profile) {
+    var original = getOriginalPosterHandle();
+    var self = (profile && profile.handle || "").toLowerCase().replace(/^@/, "");
+    var commenters = getVisibleCommenterHandles();
+    var seen = {};
+    var result = [];
+    var re = /@([A-Za-z0-9_]{1,15})/g;
+    var match;
+    while ((match = re.exec(text || ""))) {
+      var h = match[1].toLowerCase();
+      if (h === original || h === self || seen[h]) continue;
+      if (commenters[h] && !isBlocked(h)) continue;
+      seen[h] = true;
+      result.push({ handle: "@" + h, displayName: "" });
+    }
+    return result;
+  }
+
+  function addMentionedAccounts(text, profile, reason, source) {
+    getMentionedProfiles(text, profile).forEach(function(mentioned) {
+      addAccount(mentioned, reason + ":mentioned", source);
+    });
+  }
+
   // ── DOM ──
   function getText(article) { var el = article.querySelector(TEXT); return el ? el.innerText.trim() : ""; }
   function getProfile(article) {
     var el = article.querySelector(NAME); var raw = el ? el.innerText : "";
     var m = raw.match(/@([A-Za-z0-9_]+)/);
-    return { displayName: m ? raw.slice(0, m.index).trim() : raw.trim(), handle: m ? "@" + m[1] : "" };
+    if (!m) {
+      var link = article.querySelector('a[href^="/"][role="link"]');
+      if (link) m = (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9_]{1,15})(?:$|[/?#])/);
+    }
+    var at = raw.indexOf("@");
+    return { displayName: m && raw && at > 0 ? raw.slice(0, at).trim() : raw.trim(), handle: m ? "@" + m[1] : "" };
   }
 
   // ── Block button ──
@@ -110,11 +386,13 @@
       var text = getText(article), profile = getProfile(article);
       if (text && profile.handle) {
         addAccount(profile, "manual", "manual");
-        trainLocal(text, true);
+        trainLocal(getProfileTrainingText(text, profile), true);
+        recordSample(text, profile, true, "manual", "manual", 4);
+        addMentionedAccounts(text, profile, "manual", "manual");
         await saveState();
       }
       applyMask(article, "manual");
-      enqueueAutoBlock(article, profile.handle);
+      if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
       btn.textContent = "✅"; btn.disabled = false;
     };
     article.appendChild(btn);
@@ -128,10 +406,38 @@
     var overlay = document.createElement("div"); overlay.className = "xhb2-overlay";
     var meta = document.createElement("div"); meta.className = "xhb2-overlay-meta"; meta.textContent = "🚫 已屏蔽";
     var rbtn = document.createElement("button"); rbtn.className = "xhb2-overlay-btn"; rbtn.textContent = "恢复";
-    rbtn.onclick = function(ev) { ev.preventDefault(); ev.stopPropagation();
+    rbtn.onclick = async function(ev) { ev.preventDefault(); ev.stopPropagation();
       var rev = article.getAttribute("data-xhb2-revealed") === "true";
-      article.setAttribute("data-xhb2-revealed", rev ? "false" : "true");
-      rbtn.textContent = rev ? "恢复" : "隐藏";
+      if (rev) {
+        article.setAttribute("data-xhb2-revealed", "false");
+        rbtn.textContent = "恢复";
+        if (article.getAttribute("data-xhb2-corrected") === "ham") {
+          var confirmText = getText(article), confirmProfile = getProfile(article);
+          if (confirmText && confirmProfile.handle) {
+            addAccount(confirmProfile, "confirm-spam-after-restore", "manual-confirm");
+            trainLocal(getProfileTrainingText(confirmText, confirmProfile), true, true);
+            recordSample(confirmText, confirmProfile, true, "manual-confirm", "hide-after-restore", 6);
+            addMentionedAccounts(confirmText, confirmProfile, "manual-confirm", "manual-confirm");
+            article.setAttribute("data-xhb2-corrected", "spam");
+            await saveState();
+            if (config.autoBlock) enqueueAutoBlock(article, confirmProfile.handle);
+          }
+        }
+        return;
+      }
+      article.setAttribute("data-xhb2-revealed", "true");
+      article.setAttribute("data-xhb2-corrected", "ham");
+      rbtn.textContent = "隐藏";
+      var text = getText(article), profile = getProfile(article);
+      if (text && profile.handle) {
+        trainLocal(getProfileTrainingText(text, profile), false, true);
+        recordSample(text, profile, false, "restore", "restore-ham", 5);
+        unblockAccount(profile, "restore-ham");
+        getMentionedProfiles(text, profile).forEach(function(mentioned) {
+          unblockAccount(mentioned, "restore-mentioned-ham");
+        });
+        await saveState();
+      }
     };
     overlay.append(meta, rbtn); article.appendChild(overlay);
     [TEXT, NAME].forEach(function(s) { article.querySelectorAll(s).forEach(function(el) { el.classList.add("xhb2-blur"); }); });
@@ -199,30 +505,59 @@
   // ── Auto classify + block ──
   async function autoHandle(article, text, profile) {
     var h = (profile.handle || "").toLowerCase();
-    if (classifying.has(h)) return;
+    if (!profile.handle || classifying.has(h)) return;
     classifying.add(h);
 
     try {
-      // Local Bayes
-      var result = classifyLocal(text);
-      if (result.conf >= config.bayesMinConfidence && result.spam) {
-        addAccount(profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes");
-        trainLocal(text, true);
+      var localThreshold = config.bayesMinConfidence || 0.82;
+      var reviewFloor = Math.max(0.5, localThreshold - config.llmReviewMargin);
+
+      var heuristic = classifyHeuristic(text, profile);
+      if (heuristic.spam && heuristic.conf >= Math.min(0.94, localThreshold + 0.08)) {
+        addAccount(profile, heuristic.reason, "heuristic");
+        trainLocal(getProfileTrainingText(text, profile), true);
+        recordSample(text, profile, true, "heuristic", heuristic.reason, 2);
+        addMentionedAccounts(text, profile, heuristic.reason, "heuristic");
         await saveState();
-        applyMask(article, "bayes:" + result.conf.toFixed(2));
-        enqueueAutoBlock(article, profile.handle);
+        applyMask(article, heuristic.reason + ":" + heuristic.conf.toFixed(2));
+        if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
         return;
       }
 
+      // Local Bayes
+      var trainingText = getProfileTrainingText(text, profile);
+      var result = classifyLocal(trainingText);
+      if (result.conf >= Math.min(0.94, localThreshold + 0.08) && result.spam) {
+        addAccount(profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes");
+        trainLocal(trainingText, true);
+        recordSample(text, profile, true, "bayes", "bayes(" + result.conf.toFixed(2) + ")", 1);
+        addMentionedAccounts(text, profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes");
+        await saveState();
+        applyMask(article, "bayes:" + result.conf.toFixed(2));
+        if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
+        return;
+      }
+      if (result.conf >= Math.min(0.94, localThreshold + 0.08) && !result.spam) return;
+
+      var needsLLMReview = db.bayes.spamCount < 3 ||
+        (heuristic.spam && heuristic.conf >= reviewFloor) ||
+        (result.conf >= reviewFloor && result.conf < Math.min(0.94, localThreshold + 0.08));
+
       // LLM fallback
-      if (config.useLLM && result.conf >= config.llmMinConfidence) {
+      if (config.useLLM && needsLLMReview) {
         var llm = await callLLM(text, profile);
-        if (llm && llm.isSpam) {
+        if (llm && llm.isSpam && (llm.confidence || 0) >= config.llmMinConfidence) {
           addAccount(profile, "llm:" + (llm.reason || ""), "llm");
-          trainLocal(text, true);
+          trainLocal(trainingText, true);
+          recordSample(text, profile, true, "llm", llm.reason || "", 2);
+          addMentionedAccounts(text, profile, "llm:" + (llm.reason || ""), "llm");
           await saveState();
-          applyMask(article, "llm:" + (llm.confidence||0).toFixed(2));
-          enqueueAutoBlock(article, profile.handle);
+          applyMask(article, "llm:" + (llm.confidence || 0).toFixed(2));
+          if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
+        } else if (llm && !llm.isSpam && (llm.confidence || 0) >= config.llmMinConfidence) {
+          trainLocal(trainingText, false);
+          recordSample(text, profile, false, "llm", llm.reason || "", 1);
+          await saveState();
         }
       }
     } catch(e) { console.warn("xhb2 classify:", e.message); }
@@ -233,9 +568,10 @@
   function processArticle(article) {
     if (article.hasAttribute("data-xhb2")) return;
     article.setAttribute("data-xhb2", "1");
+    if (isOriginalPostArticle(article)) return;
     ensureBlockBtn(article);
     var text = getText(article), profile = getProfile(article);
-    if (!text) return;
+    if (!text || !profile.handle) return;
     if (isBlocked(profile.handle)) { applyMask(article, "account-db"); return; }
 
     var textNode = article.querySelector(TEXT);
