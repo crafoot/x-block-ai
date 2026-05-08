@@ -1,71 +1,86 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>X-block AI</title>
 <style>
-  * { box-sizing: border-box; margin: 0; }
-  body { width: 360px; padding: 16px; font-family: -apple-system, sans-serif; font-size: 13px; background: #f8fafc; color: #1e293b; }
-  h2 { font-size: 15px; margin-bottom: 10px; }
-  .section { background: #fff; border-radius: 10px; padding: 14px; margin-bottom: 12px; border: 1px solid #e2e8f0; }
-  .row { display: flex; gap: 10px; margin-bottom: 8px; }
-  label { font-weight: 600; font-size: 12px; color: #64748b; display: block; margin-bottom: 3px; }
-  input, select { width: 100%; padding: 7px 9px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
-  button { padding: 7px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
-  .btn-primary { background: #0f172a; color: #fff; }
-  .btn-outline { background: #fff; color: #334155; border: 1px solid #cbd5e1; }
-  .btn-sm { padding: 4px 8px; font-size: 11px; }
-  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .stat { background: #f1f5f9; padding: 10px; border-radius: 8px; text-align: center; }
-  .stat-val { font-size: 24px; font-weight: 700; }
-  .stat-label { font-size: 11px; color: #64748b; }
-  .status { padding: 4px 8px; border-radius: 4px; font-size: 11px; display: inline-block; }
-  .status-ok { background: #dcfce7; color: #166534; }
-  .status-warn { background: #fef9c3; color: #854d0e; }
+*{box-sizing:border-box;margin:0}body{width:380px;padding:14px;font-family:-apple-system,sans-serif;font-size:13px;background:#f8fafc;color:#1e293b}
+h2{font-size:14px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.section{background:#fff;border-radius:10px;padding:12px;margin-bottom:10px;border:1px solid #e2e8f0}
+.stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.stat{background:#f1f5f9;padding:8px 6px;border-radius:8px;text-align:center}
+.stat-val{font-size:20px;font-weight:700;line-height:1.1}
+.stat-label{font-size:10px;color:#64748b;margin-top:2px}
+.row{display:flex;gap:8px;margin-bottom:6px}
+label{font-weight:600;font-size:11px;color:#64748b;display:block;margin-bottom:2px}
+input,select{width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11px}
+button{padding:6px 12px;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600}
+.btn-primary{background:#0f172a;color:#fff}
+.btn-outline{background:#fff;color:#334155;border:1px solid #cbd5e1}
+.btn-sm{padding:3px 6px;font-size:10px}
+.status{font-size:10px;padding:3px 6px;border-radius:4px}
+.status-ok{background:#dcfce7;color:#166534}
+summary{font-size:11px;color:#64748b;cursor:pointer;margin-top:6px}
+.pipeline{font-size:10px;color:#94a3b8;line-height:1.6;margin-top:6px}
 </style>
 </head>
 <body>
 
 <div class="section">
-  <h2>🧠 AI 配置</h2>
-  <label>LLM Endpoint (OpenAI 兼容)</label>
-  <input id="llmEndpoint" placeholder="https://api.openai.com/v1/chat/completions" style="margin-bottom:6px">
-  <label>API Key</label>
-  <input id="llmApiKey" type="password" placeholder="sk-..." style="margin-bottom:6px">
-  <label>Model</label>
-  <input id="llmModel" placeholder="gpt-4o-mini" style="margin-bottom:8px">
-  <div class="row">
-    <button id="btnSaveConfig" class="btn-primary">保存配置</button>
-    <span id="configStatus"></span>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+    <h2 style="margin:0">🧠 智能引擎</h2>
+    <span id="pipelineStatus" style="font-size:10px;color:#94a3b8"></span>
   </div>
+  <div class="pipeline" id="pipelineInfo">三层过滤: 账号库→本地贝叶斯→LLM</div>
 </div>
 
 <div class="section">
   <h2>📊 知识库</h2>
   <div class="stats">
-    <div class="stat"><div class="stat-val" id="statEntries">0</div><div class="stat-label">已学习账号</div></div>
-    <div class="stat"><div class="stat-val" id="statBlocks">0</div><div class="stat-label">累计屏蔽</div></div>
+    <div class="stat"><div class="stat-val" id="statAccounts">0</div><div class="stat-label">账号库</div></div>
+    <div class="stat"><div class="stat-val" id="statBlocked">0</div><div class="stat-label">已屏蔽</div></div>
+    <div class="stat"><div class="stat-val" id="statVocab">0</div><div class="stat-label">特征词</div></div>
   </div>
-  <div class="row" style="margin-top:10px">
-    <button id="btnExport" class="btn-outline btn-sm">📤 导出</button>
-    <button id="btnImport" class="btn-outline btn-sm">📥 导入</button>
+  <div class="stats" style="margin-top:6px">
+    <div class="stat"><div class="stat-val" id="statSpam">0</div><div class="stat-label">垃圾样本</div></div>
+    <div class="stat"><div class="stat-val" id="statHam">0</div><div class="stat-label">正常样本</div></div>
+    <div class="stat"><div class="stat-val" id="statAuto">0</div><div class="stat-label">自动识别</div></div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="btnExport" class="btn-outline btn-sm">📤导出</button>
+    <button id="btnImport" class="btn-outline btn-sm">📥导入</button>
   </div>
   <input id="importFile" type="file" accept=".json" hidden>
 </div>
 
-<div class="section">
-  <h2>🔧 设置</h2>
-  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input id="autoBlockToggle" type="checkbox" checked>
-    检测到垃圾自动屏蔽
-  </label>
-  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px">
-    <span style="font-size:11px;color:#64748b">相似度阈值</span>
-    <input id="kbThreshold" type="range" min="15" max="60" value="30" style="flex:1">
-    <span id="kbThresholdLabel" style="font-size:11px">0.30</span>
-  </label>
-</div>
+<details class="section">
+  <summary>⚙️ LLM 配置 & 阈值</summary>
+  <div style="margin-top:8px">
+    <label>Endpoint (OpenAI 兼容)</label>
+    <input id="llmEndpoint" placeholder="https://api.openai.com/v1/chat/completions" style="margin-bottom:4px">
+    <label>API Key</label>
+    <input id="llmApiKey" type="password" placeholder="sk-..." style="margin-bottom:4px">
+    <label>Model</label>
+    <input id="llmModel" placeholder="gpt-4o-mini" style="margin-bottom:6px">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input id="useLLM" type="checkbox" checked> 启用 LLM (Tier 3)
+    </label>
+    <label>贝叶斯自动屏蔽阈值</label>
+    <div class="row">
+      <input id="bayesThreshold" type="range" min="60" max="95" value="82" style="flex:1">
+      <span id="bayesLabel" style="font-size:11px;min-width:32px">0.82</span>
+    </div>
+    <label>LLM 触发阈值 (低于此不调 LLM)</label>
+    <div class="row">
+      <input id="llmThreshold" type="range" min="30" max="80" value="55" style="flex:1">
+      <span id="llmLabel" style="font-size:11px;min-width:32px">0.55</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="btnSaveConfig" class="btn-primary btn-sm">保存配置</button>
+      <span id="configStatus"></span>
+    </div>
+  </div>
+</details>
 
 <script src="shared.js"></script>
 <script src="popup.js"></script>
