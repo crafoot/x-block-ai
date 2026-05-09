@@ -587,6 +587,26 @@
     [TEXT, NAME].forEach(function(s) { article.querySelectorAll(s).forEach(function(el) { el.classList.add("xhb2-blur"); }); });
   }
 
+  function resetArticleState(article) {
+    article.querySelectorAll(".xhb2-block-btn, .xhb2-overlay").forEach(function(el) { el.remove(); });
+    article.querySelectorAll(".xhb2-blur").forEach(function(el) { el.classList.remove("xhb2-blur"); });
+    [
+      "data-xhb2",
+      "data-xhb2-key",
+      "data-xhb2-masked",
+      "data-xhb2-reason",
+      "data-xhb2-revealed",
+      "data-xhb2-corrected"
+    ].forEach(function(name) { article.removeAttribute(name); });
+  }
+
+  function getArticleKey(text, profile) {
+    return [
+      (profile && profile.handle || "").toLowerCase(),
+      String(text || "").replace(/\s+/g, " ").trim().slice(0, 160)
+    ].join("|");
+  }
+
   // ── Auto-block DOM ──
   function enqueueAutoBlock(article, handle) {
     blockQueue = blockQueue.then(function() { return autoBlock(article, handle); }).catch(function() {});
@@ -692,10 +712,18 @@
 
   // ── Process ──
   function processArticle(article) {
-    if (article.hasAttribute("data-xhb2")) return;
-    article.setAttribute("data-xhb2", "1");
     var text = getText(article), profile = getProfile(article);
     if (!text || !profile.handle) return;
+    var key = getArticleKey(text, profile);
+    if (article.getAttribute("data-xhb2-key") === key && article.hasAttribute("data-xhb2")) {
+      if (!isOriginalPostArticle(article) && !article.querySelector(".xhb2-overlay")) ensureBlockBtn(article);
+      return;
+    }
+    if (article.getAttribute("data-xhb2-key") && article.getAttribute("data-xhb2-key") !== key) {
+      resetArticleState(article);
+    }
+    article.setAttribute("data-xhb2", "1");
+    article.setAttribute("data-xhb2-key", key);
     var pageHandle = getProfilePageHandle();
     var articleHandle = profile.handle.toLowerCase().replace(/^@/, "");
     if (pageHandle && articleHandle === pageHandle) rememberRecentPost(profile, text);
@@ -712,7 +740,15 @@
 
   function scanPage() { document.querySelectorAll(ARTICLE).forEach(processArticle); }
   function schedule() { if (scheduled) return; scheduled = true; requestAnimationFrame(function() { scheduled = false; scanPage(); }); }
-  function startObserver() { observer = new MutationObserver(function(ms) { for (var i = 0; i < ms.length; i++) if (ms[i].addedNodes.length) { schedule(); break; } }); observer.observe(document.body, { childList: true, subtree: true }); }
+  function startObserver() {
+    observer = new MutationObserver(function(ms) {
+      for (var i = 0; i < ms.length; i++) {
+        if (ms[i].addedNodes.length || ms[i].type === "characterData") { schedule(); break; }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    window.addEventListener("scroll", schedule, { passive: true });
+  }
 
   chrome.storage.onChanged.addListener(function(changes) { if (changes[STORAGE] || changes[BLOCKED]) stateReady = loadState(); });
   stateReady = loadState(); startObserver();
