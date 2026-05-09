@@ -17,6 +17,7 @@
   var classifying = new Set();
   var prunedOnce = false;
   var stateReady = null;
+  var recentPostSaveTimer = null;
 
   var AI_RULES = [
     {
@@ -103,6 +104,13 @@
     var handles = Object.keys(db.accounts).filter(function(h) { return db.accounts[h].blocked; });
     var data = {}; data[STORAGE] = db; data[BLOCKED] = handles;
     await chrome.storage.local.set(data);
+  }
+
+  function scheduleRecentPostSave() {
+    clearTimeout(recentPostSaveTimer);
+    recentPostSaveTimer = setTimeout(function() {
+      saveState().catch(function() {});
+    }, 1200);
   }
 
   // ── Bayes ──
@@ -325,6 +333,26 @@
     blockedHandles.add(h);
   }
 
+  function rememberRecentPost(profile, text) {
+    if (!db || !profile || !profile.handle || !text) return;
+    var h = (profile.handle || "").toLowerCase().replace(/^@/, "");
+    if (!h || !db.accounts[h]) return;
+    var item = {
+      text: String(text || "").replace(/\s+/g, " ").trim().slice(0, 500),
+      at: new Date().toISOString(),
+      source: "visible-post"
+    };
+    if (!item.text || item.text.length < 2) return;
+    var acc = db.accounts[h];
+    var posts = (acc.recentPosts || []).filter(function(p) {
+      return p && p.text && p.text !== item.text;
+    });
+    posts.push(item);
+    acc.recentPosts = posts.slice(-5);
+    acc.recentPostsUpdatedAt = item.at;
+    scheduleRecentPostSave();
+  }
+
   function unblockAccount(profile, reason) {
     var h = (profile.handle || "").toLowerCase().replace(/^@/, "");
     if (!h || !db.accounts[h]) return;
@@ -347,6 +375,13 @@
   function isOriginalPostArticle(article) {
     if (!/\/status\/\d+/.test(location.pathname)) return false;
     return article === document.querySelector(ARTICLE);
+  }
+
+  function getProfilePageHandle() {
+    if (/\/status\/\d+/.test(location.pathname)) return "";
+    var h = (location.pathname.match(/^\/([A-Za-z0-9_]{1,15})(?:$|[/?#])/i) || [])[1];
+    if (!h || /^(home|explore|notifications|messages|i|settings|search|compose|jobs)$/i.test(h)) return "";
+    return h.toLowerCase();
   }
 
   function getVisibleCommenterHandles() {
@@ -551,7 +586,6 @@
         addMentionedAccounts(text, profile, heuristic.reason, "heuristic");
         await saveState();
         applyMask(article, heuristic.reason + ":" + heuristic.conf.toFixed(2));
-        if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
         return;
       }
 
@@ -565,7 +599,6 @@
         addMentionedAccounts(text, profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes");
         await saveState();
         applyMask(article, "bayes:" + result.conf.toFixed(2));
-        if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
         return;
       }
       if (result.conf >= Math.min(0.94, localThreshold + 0.08) && !result.spam) return;
@@ -584,7 +617,6 @@
           addMentionedAccounts(text, profile, "llm:" + (llm.reason || ""), "llm");
           await saveState();
           applyMask(article, "llm:" + (llm.confidence || 0).toFixed(2));
-          if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
         } else if (llm && !llm.isSpam && (llm.confidence || 0) >= config.llmMinConfidence) {
           trainLocal(trainingText, false);
           recordSample(text, profile, false, "llm", llm.reason || "", 1);
@@ -599,10 +631,13 @@
   function processArticle(article) {
     if (article.hasAttribute("data-xhb2")) return;
     article.setAttribute("data-xhb2", "1");
-    if (isOriginalPostArticle(article)) return;
-    ensureBlockBtn(article);
     var text = getText(article), profile = getProfile(article);
     if (!text || !profile.handle) return;
+    var pageHandle = getProfilePageHandle();
+    var articleHandle = profile.handle.toLowerCase().replace(/^@/, "");
+    if (pageHandle && articleHandle === pageHandle) rememberRecentPost(profile, text);
+    if (isOriginalPostArticle(article)) return;
+    ensureBlockBtn(article);
     if (isBlocked(profile.handle)) { applyMask(article, "account-db"); return; }
 
     var textNode = article.querySelector(TEXT);

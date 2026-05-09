@@ -9,6 +9,7 @@ var MIN_DISTILL_SPAM = 12;
 var MIN_DISTILL_NEW_WEIGHT = 18;
 var MIN_DISTILL_INTERVAL_MS = 12 * 60 * 60 * 1000;
 var DISTILL_SAMPLE_LIMIT = 80;
+var ACCOUNT_AUDIT_LIMIT = 40;
 
 var DB = { accounts: {}, bayes: { spamCount: 0, hamCount: 0, words: {} } };
 var CONFIG = {
@@ -486,7 +487,79 @@ function sanitizeReleaseHandles(list) {
 function isProtectedAccount(acc) {
   var sources = (acc.sources || []).join(",");
   var reasons = (acc.reasons || []).join(",");
-  return (acc.blockCount || 0) > 5 || /manual|manual-confirm/.test(sources + "," + reasons);
+  return /manual|manual-confirm/.test(sources + "," + reasons);
+}
+
+function accountEvidenceScore(acc, samples) {
+  var text = [
+    acc && acc.handle || "",
+    acc && acc.displayName || "",
+    (acc && acc.reasons || []).join(" "),
+    samples.map(function(s) { return s.text || ""; }).join(" ")
+  ].join(" ").toLowerCase();
+  var score = 0;
+  [
+    "福利", "裸聊", "约炮", "外围", "色播", "私信", "主页", "电报", "telegram",
+    "onlyfans", "互fo", "互关", "回关", "互粉", "涨粉", "接单", "兼职", "副业"
+  ].forEach(function(k) {
+    if (text.indexOf(k) >= 0) score += 2;
+  });
+  score += Math.min(3, Number(acc && acc.blockCount) || 0);
+  if (isProtectedAccount(acc)) score += 8;
+  return score;
+}
+
+function accountSamplesByHandle(handle) {
+  var h = normalizeHandle(handle);
+  return (DB.samples || []).filter(function(s) {
+    return normalizeHandle(s.handle) === h;
+  }).slice(-8);
+}
+
+function pickAccountAuditCandidates() {
+  DB = normalizeDB(DB);
+  return Object.keys(DB.accounts || {}).map(function(h) {
+    var acc = DB.accounts[h];
+    if (!acc || !acc.blocked) return null;
+    var related = accountSamplesByHandle(h);
+    var recentPosts = (acc.recentPosts || []).slice(-5);
+    var ham = related.filter(function(s) { return s.label === "ham"; }).length;
+    var spam = related.filter(function(s) { return s.label === "spam"; }).length;
+    return {
+      handle: acc.handle || "@" + h,
+      displayName: acc.displayName || "",
+      blocked: !!acc.blocked,
+      protected: isProtectedAccount(acc),
+      blockCount: acc.blockCount || 0,
+      sources: acc.sources || [],
+      reasons: acc.reasons || [],
+      firstSeen: acc.firstSeen || "",
+      lastSeen: acc.lastSeen || "",
+      hamSamples: ham,
+      spamSamples: spam,
+      evidenceScore: accountEvidenceScore(acc, related),
+      recentPosts: recentPosts.map(function(p) {
+        return {
+          text: String(p && p.text || "").slice(0, 200),
+          at: p && p.at || "",
+          source: p && p.source || "visible-post"
+        };
+      }),
+      recentTexts: related.slice(-3).map(function(s) {
+        return {
+          label: s.label,
+          source: s.source,
+          weight: sampleWeight(s),
+          text: String(s.text || "").slice(0, 120)
+        };
+      })
+    };
+  }).filter(Boolean).sort(function(a, b) {
+    if (a.protected !== b.protected) return a.protected ? 1 : -1;
+    if (a.hamSamples !== b.hamSamples) return b.hamSamples - a.hamSamples;
+    if (a.evidenceScore !== b.evidenceScore) return a.evidenceScore - b.evidenceScore;
+    return String(b.lastSeen || "").localeCompare(String(a.lastSeen || ""));
+  }).slice(0, ACCOUNT_AUDIT_LIMIT);
 }
 
 function applyReleaseSuggestions(handles) {
@@ -521,7 +594,7 @@ function applyReleaseSuggestions(handles) {
   return { released: released, protectedHandles: protectedHandles };
 }
 
-function buildDistillPrompt(samples) {
+function buildDistillPrompt(samples, accountAudit) {
   var compact = samples.map(function(s) {
     return {
       label: s.label,
@@ -535,14 +608,33 @@ function buildDistillPrompt(samples) {
       text: String(s.text || "").slice(0, 240)
     };
   });
+  accountAudit = (accountAudit || []).map(function(acc) {
+    return {
+      handle: acc.handle,
+      name: acc.displayName,
+      protected: acc.protected,
+      blockCount: acc.blockCount,
+      sources: acc.sources,
+      reasons: acc.reasons,
+      hamSamples: acc.hamSamples,
+      spamSamples: acc.spamSamples,
+      evidenceScore: acc.evidenceScore,
+      recentPosts: acc.recentPosts,
+      recentTexts: acc.recentTexts
+    };
+  });
   return [
     "只输出一个合法 JSON 对象。不要写分析过程，不要写 Markdown，不要写代码块。",
     "JSON 顶层必须只有 rules 和 releaseHandles 两个字段。",
     "你在为 X.com 黄推评论过滤器生成本地规则。",
     "输入是用户本地样本，spam=应屏蔽，ham=误杀或正常。",
+    "samples 用于蒸馏规则；accountAudit 是已屏蔽账号复核候选，用于发现误杀账号。",
     "weight 越高越重要：手动屏蔽和手动恢复优先级最高。",
-    "原始屏蔽库可能包含误杀。你可以输出 releaseHandles 建议释放误杀账号。",
-    "但人工屏蔽/人工确认/反复屏蔽的账号应保守，不要建议释放。",
+    "原始屏蔽库可能包含误杀。请认真复核 accountAudit，可在 releaseHandles 输出应释放的误杀账号。",
+    "释放标准：账号不像黄推/营销/导流；最近 5 条 recentPosts 或最近评论样本看起来正常；没有成人导流、互关涨粉、私信主页、Telegram/OnlyFans 等强证据；且不是人工保护账号。",
+    "不要释放 protected=true、人工屏蔽、人工确认或有明确黄推证据的账号。",
+    "自动屏蔽、贝叶斯、启发式、LLM、账号库导入来源都可能误杀；如果 recentPosts 显示是普通讨论/正常用户，应加入 releaseHandles。",
+    "如果账号已经被 X 原生 block，recentPosts 可能为空。此时只能根据已有样本、昵称、用户名和来源判断；证据不足但不像营销号时，可以保守释放本地 block。",
     "请蒸馏少量可解释关键词组合规则，优先避免误杀 ham。",
     "规则只允许关键词数组，不要返回正则，不要返回解释。",
     "最多输出 8 条规则。每个关键词应是短特征，不要复制整句评论，不要输出随机短码或整段 URL。",
@@ -555,7 +647,7 @@ function buildDistillPrompt(samples) {
     "最终输出必须从 { 开始，到 } 结束。",
     "输出模板：{\"rules\":[{\"id\":\"profile-funnel\",\"title\":\"主页导流\",\"textAny\":[\"主页\",\"私信\"],\"nameAny\":[\"福利\"],\"handleAny\":[],\"anyAny\":[],\"textWeight\":3,\"nameWeight\":2,\"handleWeight\":2,\"anyWeight\":2,\"minScore\":5}],\"releaseHandles\":[\"@maybe_false_positive\"]}",
     "",
-    JSON.stringify(compact).slice(0, 12000)
+    JSON.stringify({ samples: compact, accountAudit: accountAudit }).slice(0, 16000)
   ].join("\n");
 }
 
@@ -651,14 +743,15 @@ async function distillRules() {
   spam = samples.filter(function(s) { return s.label === "spam"; }).length;
   var ham = samples.filter(function(s) { return s.label === "ham"; }).length;
   if (spam < 8) throw new Error("屏蔽样本太少，至少需要 8 条");
+  var accountAudit = pickAccountAuditCandidates();
   var layers = layerCounts(samples);
-  await setDistillJob({ status: "running", step: "calling-llm", samples: samples.length, spamSamples: spam, hamSamples: ham, layers: layers });
+  await setDistillJob({ status: "running", step: "calling-llm", samples: samples.length, spamSamples: spam, hamSamples: ham, accountAudit: accountAudit.length, layers: layers });
 
   var parsed = await fetchLLMJSON({
     model: CONFIG.llmModel || "gpt-4.1-mini",
     messages: [
       { role: "system", content: "You are a JSON generator. Return exactly one valid JSON object. Do not include reasoning or explanation." },
-      { role: "user", content: buildDistillPrompt(samples) }
+      { role: "user", content: buildDistillPrompt(samples, accountAudit) }
     ],
     response_format: { type: "json_object" },
     temperature: 0,
@@ -681,6 +774,7 @@ async function distillRules() {
       released: release.released.length,
       protected: release.protectedHandles.length,
       analyzedSamples: samples.length,
+      analyzedAccounts: accountAudit.length,
       analyzedSpam: spam,
       analyzedHam: ham,
       layers: layers,

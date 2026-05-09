@@ -85,6 +85,7 @@
     }
     if (job.status === "running") {
       var detail = job.samples ? " · 本次样本 " + job.samples + " (spam " + (job.spamSamples || 0) + "/ham " + (job.hamSamples || 0) + ")" : "";
+      if (job.accountAudit) detail += " · 复核账号 " + job.accountAudit;
       return "AI分析中: " + (job.step || "running") + detail + layerText(job.layers);
     }
     if (job.status === "success") {
@@ -92,6 +93,7 @@
         " · 释放 " + (job.released || 0) +
         " · 保护 " + (job.protected || 0) +
         " · 本次样本 " + (job.analyzedSamples || 0) +
+        " · 复核账号 " + (job.analyzedAccounts || 0) +
         " (spam " + (job.analyzedSpam || 0) + "/ham " + (job.analyzedHam || 0) + ")" +
         layerText(job.layers);
     }
@@ -135,7 +137,7 @@
     var html = "";
     html += '<div class="data-row"><div class="data-meta">数据范围</div>' +
       '<div class="data-text">账号 ' + totalAccounts + ' · 已屏蔽 ' + totalBlocked + ' · 原始样本 ' + totalSamples +
-      ' (spam ' + totalSpamSamples + '/ham ' + totalHamSamples + ') · AI分析最多选取 80 条高权重代表样本</div></div>';
+      ' (spam ' + totalSpamSamples + '/ham ' + totalHamSamples + ') · AI分析最多选取 80 条样本 + 40 个屏蔽账号复核</div></div>';
     html += '<div class="data-row"><div class="data-meta">最近屏蔽账号</div>' +
       (accounts.length ? accounts.map(function(a) {
         return '<div class="data-text">' + escapeHTML(a.handle) + ' ' + escapeHTML(a.displayName || "") + '</div>';
@@ -209,7 +211,7 @@
     getConfig().then(function(cfg) {
       var parts = ["① 账号库", "② 黄推规则", "③ 贝叶斯≥" + (cfg.bayesMinConfidence || 0.82).toFixed(2)];
       parts.push(cfg.useLLM && cfg.llmEndpoint ? "④ 边界±" + (cfg.llmReviewMargin || 0.12).toFixed(2) + "→LLM≥" + (cfg.llmMinConfidence || 0.55).toFixed(2) : "④ 不调 LLM");
-      parts.push(cfg.testMode ? "测试模式" : (cfg.autoBlock === false ? "仅入库" : "自动屏蔽"));
+      parts.push(cfg.testMode ? "测试模式" : (cfg.autoBlock === false ? "仅本地入库" : "手动时原生屏蔽"));
       el.pipelineInfo.textContent = parts.join(" → ");
     });
   }

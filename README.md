@@ -13,7 +13,7 @@ It combines manual blocking, local learning, local rules, and optional LLM revie
 - Calls an LLM only for uncertain or borderline cases when configured.
 - Periodically distills local samples into compact AI rules.
 - Supports false-positive correction through `恢复`.
-- Can release likely false-positive accounts during AI rule analysis, while protecting manually blocked or repeatedly blocked accounts.
+- Can release likely false-positive accounts during AI rule analysis, while protecting manually blocked accounts.
 - Exports/imports the local database as JSON.
 
 ## Install
@@ -28,6 +28,11 @@ After code changes, click `Reload` on the extension card and refresh X.com.
 For testing, enable `测试模式` in the popup. Test mode still writes local samples,
 account state, and correction weights, but it will not click through X.com's
 native block flow.
+
+Automatic matches are locally hidden and saved first. The extension does not
+click X.com's native block flow for automatic matches, because once an account is
+natively blocked its timeline is no longer visible for later review. Manual
+blocks can still trigger the native block flow.
 
 ## How It Works
 
@@ -94,7 +99,8 @@ This protects against accidental restores.
 
 ## AI Analysis Rules
 
-Click `AI分析规则` in the popup to ask the configured LLM to analyze local samples.
+Click `AI分析规则` in the popup to ask the configured LLM to analyze local samples
+and review blocked accounts.
 
 It can:
 
@@ -106,20 +112,26 @@ Accounts are protected from automatic release if:
 
 - They were manually blocked.
 - They were manually confirmed after restore.
-- They were blocked more than 5 times.
 
 The analysis has timeout/error handling. If it fails, the popup should show the reason.
 
-The analyzer currently uses stratified sampling:
+The analyzer currently uses stratified sampling plus account audit:
 
 - Up to 25 high-weight manual spam samples
 - Up to 20 automatic spam samples
 - Up to 20 restore, release, or normal correction samples
 - Up to 10 recent samples
 - Up to 5 account fallback samples when blocked accounts have little text evidence
+- Up to 40 blocked accounts for false-positive review, prioritized by weak spam
+  evidence, ham/restore evidence, low block count, non-protected status, and up
+  to 5 cached recent posts when available
 
 This keeps manual judgement and false-positive corrections visible to the LLM
 while still preventing the prompt from growing without limit.
+
+When the LLM returns `releaseHandles`, the extension removes those accounts from
+the local blocked list and records an `ai-release` ham sample. Manual blocks and
+manual-confirm blocks are protected from automatic release.
 
 ## Data View
 
