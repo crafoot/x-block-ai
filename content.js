@@ -16,6 +16,7 @@
   var blockQueue = Promise.resolve();
   var classifying = new Set();
   var prunedOnce = false;
+  var stateReady = null;
 
   var AI_RULES = [
     {
@@ -90,6 +91,12 @@
       if (pruneBayes()) await saveState();
     }
     schedule();
+  }
+
+  function ensureStateReady() {
+    if (db) return Promise.resolve();
+    if (!stateReady) stateReady = loadState();
+    return stateReady;
   }
 
   async function saveState() {
@@ -398,17 +405,26 @@
     btn.onclick = async function(e) {
       e.preventDefault(); e.stopPropagation();
       btn.textContent = "⏳"; btn.disabled = true;
-      var text = getText(article), profile = getProfile(article);
-      if (text && profile.handle) {
-        addAccount(profile, "manual", "manual");
-        trainLocal(getProfileTrainingText(text, profile), true);
-        recordSample(text, profile, true, "manual", "manual", 4);
-        addMentionedAccounts(text, profile, "manual", "manual");
-        await saveState();
+      var ok = false;
+      try {
+        await ensureStateReady();
+        var text = getText(article), profile = getProfile(article);
+        if (text && profile.handle) {
+          addAccount(profile, "manual", "manual");
+          trainLocal(getProfileTrainingText(text, profile), true);
+          recordSample(text, profile, true, "manual", "manual", 4);
+          addMentionedAccounts(text, profile, "manual", "manual");
+          await saveState();
+        }
+        applyMask(article, "manual");
+        if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
+        ok = true;
+      } catch (err) {
+        console.warn("[X-block AI] manual block failed", err);
+      } finally {
+        btn.textContent = ok ? "✅" : "重试";
+        btn.disabled = false;
       }
-      applyMask(article, "manual");
-      if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
-      btn.textContent = "✅"; btn.disabled = false;
     };
     article.appendChild(btn);
   }
@@ -600,6 +616,6 @@
   function schedule() { if (scheduled) return; scheduled = true; requestAnimationFrame(function() { scheduled = false; scanPage(); }); }
   function startObserver() { observer = new MutationObserver(function(ms) { for (var i = 0; i < ms.length; i++) if (ms[i].addedNodes.length) { schedule(); break; } }); observer.observe(document.body, { childList: true, subtree: true }); }
 
-  chrome.storage.onChanged.addListener(function(changes) { if (changes[STORAGE] || changes[BLOCKED]) loadState(); });
-  loadState(); startObserver();
+  chrome.storage.onChanged.addListener(function(changes) { if (changes[STORAGE] || changes[BLOCKED]) stateReady = loadState(); });
+  stateReady = loadState(); startObserver();
 })();
