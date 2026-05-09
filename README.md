@@ -1,196 +1,202 @@
 # X-block AI
 
-Chrome extension for reducing porn/spam comments on X.com.
+一个用于减少 X.com 黄推、色情导流、垃圾营销评论的 Chrome 扩展。
 
-It combines manual blocking, local learning, local rules, and optional LLM review. The goal is to block obvious spam quickly while reducing false positives through correction samples and periodic rule distillation.
+它结合了手动屏蔽、本地学习、本地规则和可选的大模型复核。目标是快速隐藏明显垃圾评论，同时通过恢复纠错、弱证据分层和定期规则分析来降低误杀。
 
-## Features
+## 功能特点
 
-- Adds a `屏蔽并学习` button to X.com comments.
-- Records blocked accounts in a local account database.
-- Learns from manual blocks with a local Naive Bayes model.
-- Uses nickname, username, comment text, and mentioned accounts as signals.
-- Calls an LLM only for uncertain or borderline cases when configured.
-- Auto matches hide the current comment first; accounts enter the local block list only when evidence is strong.
-- Periodically distills local samples into compact AI rules.
-- Supports false-positive correction through `恢复`.
-- Includes `复核误杀` to locally release weak-evidence automatic blocks.
-- Includes `重置自动学习` to clear only automatic learning data while keeping manual actions and protected accounts.
-- Can release likely false-positive accounts during AI rule analysis, while protecting manually blocked accounts.
-- Exports/imports the local database as JSON.
+- 在 X.com 评论上添加 `屏蔽并学习` 按钮。
+- 将屏蔽账号记录到本地账号库。
+- 使用评论正文、昵称、用户名和被提及账号作为判断信号。
+- 本地使用规则和 Naive Bayes 模型学习用户偏好。
+- 只有本地拿不准时才调用大模型复核。
+- 自动命中会先隐藏当前评论，只有强证据才会把账号加入本地屏蔽库。
+- 弱证据命中会记录为观察样本，不会训练成强 spam。
+- 支持通过 `恢复` 纠正误杀，并保护已恢复账号不被自动再次屏蔽。
+- 支持 `复核误杀`，本地释放弱证据自动屏蔽账号。
+- 支持 `重置自动学习`，只清理自动学习数据，保留手动操作和保护账号。
+- 支持 `AI分析规则`，让大模型从本地样本中提炼紧凑规则并复核误杀账号。
+- 支持导入、导出本地数据库 JSON。
 
-## Install
+## 安装方式
 
-1. Open Chrome and go to `chrome://extensions/`.
-2. Enable `Developer mode`.
-3. Click `Load unpacked`.
-4. Select this folder.
+1. 打开 Chrome，进入 `chrome://extensions/`。
+2. 开启右上角 `开发者模式`。
+3. 点击 `加载已解压的扩展程序`。
+4. 选择本项目目录。
 
-After code changes, click `Reload` on the extension card and refresh X.com.
+更新代码后，需要在扩展卡片上点击 `重新加载`，然后刷新 X.com 页面。
 
-For testing, enable `测试模式` in the popup. Test mode still writes local samples,
-account state, and correction weights, but it will not click through X.com's
-native block flow.
+测试时可以在 popup 中开启 `测试模式`。测试模式仍会写入本地样本、账号状态和纠错权重，但不会点击 X.com 原生屏蔽流程。
 
-Automatic matches are locally hidden and saved first. The extension does not
-click X.com's native block flow for automatic matches, because once an account is
-natively blocked its timeline is no longer visible for later review. Manual
-blocks can still trigger the native block flow.
+自动命中的评论会先在本地隐藏并保存。扩展不会对自动命中账号直接点击 X.com 原生 block，因为一旦原生 block，后续就很难继续观察这个账号是否被误杀。手动点击 `屏蔽并学习` 时可以按配置触发 X.com 原生屏蔽。
 
-## How It Works
+## 工作流程
 
-The classifier runs in this order:
+分类流程按以下顺序运行：
 
-1. Account database
-   - If an account is already blocked locally, its comments are masked.
-2. Local rules
-   - Strong adult/spam signals can be handled locally.
-   - Weaker marketing, nickname, or mention-based signals are treated as suspicious and usually sent to LLM review.
-3. Local Bayes model
-   - Learns from manual blocks, LLM labels, and correction samples.
-4. LLM review
-   - Used for borderline or suspicious cases when API settings are configured.
-   - LLM results are written back as weighted samples.
-5. AI rule distillation
-   - The popup button `AI分析规则` asks the LLM to summarize local samples into compact rules.
-   - The analyzer samples up to 80 representative records by layer, not just the newest rows.
+1. 账号库
+   - 如果账号已在本地屏蔽库中，直接遮罩评论。
+2. 本地规则
+   - 强色情、导流、营销信号可直接本地处理。
+   - 较弱的昵称、营销词、提及账号等信号只作为可疑线索。
+3. 本地 Bayes 模型
+   - 从手动屏蔽、大模型标签和恢复纠错中学习。
+4. 大模型复核
+   - 只在本地判断边界或可疑时调用。
+   - 复核结果会写回本地样本。
+5. AI 规则分析
+   - popup 中的 `AI分析规则` 会让大模型总结本地样本，生成紧凑规则。
+   - 分析时按层抽样，最多选取 80 条代表样本，不只取最新样本。
 
-## Signals Used
+## 使用的信号
 
-The extension considers:
+扩展会考虑：
 
-- Comment text
-- Display name / nickname
-- Username / handle
-- Mentioned accounts in the comment
+- 评论正文
+- 昵称
+- 用户名 / handle
+- 评论中提及的账号
 
-Mentioned accounts are weighted signals only. The extension attempts to exclude:
+提及账号只是加权信号。扩展会尽量排除：
 
-- The original poster
-- Other visible normal commenters
+- 原帖作者
+- 页面上已可见的正常评论者
 
-## Manual Actions
+## 手动操作
 
 ### 屏蔽并学习
 
-Manual block is a high-confidence spam signal.
+手动屏蔽是高置信 spam 信号。
 
-It will:
+点击后会：
 
-- Add the account to the local block database.
-- Train the local model as spam.
-- Record a high-weight sample.
-- Optionally trigger X.com's native block flow.
-- Add suspicious mentioned accounts to the local database when appropriate.
+- 将账号加入本地屏蔽库。
+- 如果评论有正文，将该样本训练为 spam。
+- 记录高权重手动样本。
+- 按配置触发 X.com 原生屏蔽流程。
+- 在合适情况下，把可疑提及账号也加入本地库。
+
+如果某条评论结构特殊，扩展拿不到正文，但能拿到账号，也会显示 `屏蔽并学习`。此时会按账号级手动屏蔽处理。
 
 ### 恢复
 
-`恢复` means the current item was likely a false positive.
+`恢复` 表示当前评论大概率是误杀。
 
-It will:
+点击后会：
 
-- Reveal the comment.
-- Train the local model as ham.
-- Record a high-weight correction sample.
-- Remove the account from the local blocked list.
-- Protect the account from future automatic re-blocking unless you manually hide it again.
+- 展开评论内容。
+- 将样本训练为 ham。
+- 记录高权重纠错样本。
+- 从本地屏蔽列表中移除该账号。
+- 保护该账号，避免未来被自动规则再次屏蔽。
 
 ### 恢复后再隐藏
 
-If you restore a comment and then decide it really should be blocked, clicking `隐藏` again records a stronger spam correction.
+如果你恢复后又觉得确实应该屏蔽，可以点击 `隐藏`。
 
-This protects against accidental restores.
+这会记录更强的 spam 纠错样本，用来抵消误点恢复。
 
-## AI Analysis Rules
+## 复核误杀
 
-Click `AI分析规则` in the popup to ask the configured LLM to analyze local samples
-and review blocked accounts.
+点击 popup 中的 `复核误杀`，扩展会在本地释放证据较弱的自动屏蔽账号。
 
-It can:
+它只处理来自以下来源的自动屏蔽：
 
-- Generate compact local rules.
-- Suggest releasing likely false-positive accounts.
-- Preserve high-confidence blocked accounts.
+- heuristic
+- bayes
+- llm
+- account-db
 
-Accounts are protected from automatic release if:
+以下账号会被保护，不会被自动释放：
 
-- They were manually blocked.
-- They were manually confirmed after restore.
+- 手动屏蔽账号
+- 手动确认账号
+- 已恢复账号
+- AI 已释放账号
+- 本地复核已释放账号
 
-The analysis has timeout/error handling. If it fails, the popup should show the reason.
+如果旧版本造成了较多误杀，建议先点击 `复核误杀`，然后继续浏览，并对剩余误杀使用 `恢复`。
 
-The analyzer currently uses stratified sampling plus account audit:
+## 重置自动学习
 
-- Up to 25 high-weight manual spam samples
-- Up to 20 automatic spam samples
-- Up to 20 restore, release, or normal correction samples
-- Up to 10 recent samples
-- Up to 5 account fallback samples when blocked accounts have little text evidence
-- Up to 40 blocked accounts for false-positive review, prioritized by weak spam
-  evidence, ham/restore evidence, low block count, non-protected status, and up
-  to 5 cached recent posts when available
+如果旧自动样本仍让分类器过于激进，可以点击 `重置自动学习`。
 
-This keeps manual judgement and false-positive corrections visible to the LLM
-while still preventing the prompt from growing without limit.
+它会：
 
-When the LLM returns `releaseHandles`, the extension removes those accounts from
-the local blocked list and records an `ai-release` ham sample. Manual blocks and
-manual-confirm blocks are protected from automatic release.
+- 移除自动生成的账号记录。
+- 移除自动样本。
+- 清空已蒸馏的 AI 规则。
+- 从保留下来的手动屏蔽和恢复记录重建 Bayes 模型。
 
-## False-positive Review
+它不会清空手动屏蔽、恢复纠错和受保护账号，比 `清空学习库` 更温和。
 
-Click `复核误杀` in the popup to release local blocked accounts that look weakly supported by evidence.
+## AI 分析规则
 
-It only targets automatic blocks from heuristic, Bayes, LLM, or imported account-db sources. Manual blocks, restored accounts, AI-released accounts, and manual-confirm blocks are protected.
+点击 popup 中的 `AI分析规则`，扩展会让配置的大模型分析本地样本和待复核账号。
 
-This is useful after an older aggressive build created many false positives. Run it after reloading the extension, then browse normally and use `恢复` on any remaining normal comments. If old automatic samples still make the classifier too aggressive, use `重置自动学习`.
+它可以：
 
-## Reset Automatic Learning
+- 生成紧凑的本地关键词组合规则。
+- 建议释放疑似误杀账号。
+- 保护高置信或手动确认账号。
 
-Click `重置自动学习` if you want to keep manual blocks and restores, but wipe the automatic classifier state that may have learned too aggressively.
+自动释放时会遵守保护规则：手动屏蔽、手动确认、恢复保护等账号不会被自动释放。
 
-It removes auto-generated accounts and auto samples, then resets the Bayes model and distilled AI rules. The Bayes model is rebuilt from the remaining manual block/restore history, so protected accounts and manual corrections stay useful.
+分析采用分层抽样和账号审计：
 
-## Data View
+- 最多 25 条高权重手动 spam 样本。
+- 最多 20 条强自动 spam 样本。
+- 最多 8 条弱证据观察样本。
+- 最多 20 条恢复、释放或正常纠错样本。
+- 最多 10 条最近样本。
+- 最多 5 条账号兜底样本。
+- 最多 40 个屏蔽账号用于误杀复核。
 
-The popup includes `查看本地数据`.
+弱证据样本会标记为 `auto-suspect`。它只能作为辅助线索，不能单独推动 AI 规则生成。
 
-It shows:
+## 查看本地数据
 
-- Recent blocked accounts
-- Recent spam samples
-- Recent normal/correction samples
-- Current AI rules
+popup 中的 `查看本地数据` 会显示：
 
-For full data, use `导出`.
+- 最近屏蔽账号
+- 最近强 spam 样本
+- 最近弱证据样本
+- 最近正常 / 纠错样本
+- 当前 AI 规则
 
-## Local Data Format
+完整数据可以通过 `导出` 获取。
 
-Exported JSON may include:
+## 本地数据格式
 
-- `accounts`: local account database
-- `samples`: weighted raw samples
-- `aiRules`: distilled AI rules
-- `bayes`: local Naive Bayes feature counts
+导出的 JSON 可能包含：
 
-Sample labels:
+- `accounts`：本地账号库。
+- `samples`：带权重的原始样本。
+- `aiRules`：AI 分析得到的本地规则。
+- `bayes`：本地 Bayes 特征计数。
 
-- `spam`: should be blocked
-- `ham`: normal or false-positive correction
+样本标签：
 
-Common sample sources:
+- `spam`：应屏蔽。
+- `ham`：正常内容或误杀纠错。
 
-- `manual`: user clicked `屏蔽并学习`
-- `manual-confirm`: restored and then hidden again
-- `restore`: user clicked `恢复`
-- `llm`: LLM classification
-- `bayes`: local Bayes classification
-- `heuristic`: local rule classification
-- `ai-release`: released by AI rule analysis
+常见样本来源：
 
-## LLM Configuration
+- `manual`：用户点击 `屏蔽并学习`。
+- `manual-confirm`：恢复后又点击隐藏。
+- `restore`：用户点击 `恢复`。
+- `llm`：大模型分类。
+- `bayes`：本地 Bayes 分类。
+- `heuristic`：本地规则分类。
+- `ai-release`：AI 分析释放。
+- `local-review`：本地误杀复核释放。
+- `*-observe`：弱证据观察样本。
 
-The popup supports common OpenAI-compatible providers:
+## 大模型配置
+
+popup 支持常见 OpenAI-compatible 服务：
 
 - DeepSeek
 - OpenAI
@@ -198,49 +204,47 @@ The popup supports common OpenAI-compatible providers:
 - Groq
 - SiliconFlow
 - Zhipu GLM
-- Custom endpoint
+- 自定义 endpoint
 
-Required fields:
+必填字段：
 
 - Endpoint
 - API Key
 - Model
 
-For DeepSeek, use a non-reasoning model for rule analysis:
+DeepSeek 建议使用非推理模型做规则分析：
 
-- Recommended: `deepseek-v4-flash`
-- Also OK: `deepseek-v4-pro`
-- Avoid: `deepseek-reasoner`, because it may return reasoning text without final JSON
+- 推荐：`deepseek-v4-flash`
+- 也可用：`deepseek-v4-pro`
+- 避免：`deepseek-reasoner`，它可能只返回推理过程而不返回最终 JSON。
 
-Preset models are intentionally non-reasoning / direct-answer models because `AI分析规则` needs strict JSON:
+预设模型刻意选择了非推理 / 直接回答模型，因为 `AI分析规则` 需要严格 JSON：
 
-- OpenAI: `gpt-4.1-mini`
-- OpenRouter: `openai/gpt-4.1-mini`
-- Groq: `llama-3.3-70b-versatile`
-- SiliconFlow: `deepseek-ai/DeepSeek-V3`
-- Zhipu GLM: `glm-4-flash`
+- OpenAI：`gpt-4.1-mini`
+- OpenRouter：`openai/gpt-4.1-mini`
+- Groq：`llama-3.3-70b-versatile`
+- SiliconFlow：`deepseek-ai/DeepSeek-V3`
+- Zhipu GLM：`glm-4-flash`
 
-If a provider adds a newer direct chat/flash model, prefer that over a reasoning model for this extension.
+如果服务商提供了更新的 direct chat / flash 模型，优先选择这类模型，而不是推理模型。
 
-The extension uses standard chat-completions style requests.
+## 推荐设置
 
-## Recommended Settings
+- `本地贝叶斯自动屏蔽阈值` 建议保持在 `0.90` 或更高。
+- `大模型判定阈值` 建议保持在 `0.72` 或更高。
+- `边界复核范围` 建议保持在 `0.08` 到 `0.12`。
+- 如果误杀仍偏多，提高 Bayes 阈值或缩小边界复核范围。
+- 看到正常评论被遮罩时，及时点击 `恢复`，模型会学习你的纠错。
 
-- Keep `本地贝叶斯自动屏蔽阈值` around `0.90` or higher.
-- Keep `大模型判定阈值` around `0.72` or higher.
-- Keep `边界复核范围` around `0.08` to `0.12`.
-- If false positives are high, increase the Bayes threshold or reduce the review range.
-- Use `恢复` whenever a normal comment is masked, so the model learns.
+## 隐私说明
 
-## Privacy
+本地数据保存在 `chrome.storage.local`。
 
-Data is stored in `chrome.storage.local`.
+启用大模型后，边界评论和 `AI分析规则` 使用的本地样本会发送给你配置的 API 服务商。不要配置你不信任的服务商。
 
-When LLM is enabled, uncertain comments and local samples used for `AI分析规则` are sent to the configured API provider. Do not configure an API provider you do not trust.
+## 开发
 
-## Development
-
-Syntax check:
+语法检查：
 
 ```bash
 node --check content.js
@@ -248,7 +252,7 @@ node --check background.js
 node --check popup.js
 ```
 
-Push changes:
+提交并推送：
 
 ```bash
 git add .
