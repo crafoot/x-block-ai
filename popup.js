@@ -3,17 +3,17 @@
   var $ = function(id) { return document.getElementById(id); };
 
   var PRESETS = {
-    deepseek:  { endpoint: "https://api.deepseek.com/v1/chat/completions", model: "deepseek-chat" },
-    openai:    { endpoint: "https://api.openai.com/v1/chat/completions",   model: "gpt-4o-mini" },
-    openrouter:{ endpoint: "https://openrouter.ai/api/v1/chat/completions", model: "openai/gpt-4o-mini" },
+    deepseek:  { endpoint: "https://api.deepseek.com/v1/chat/completions", model: "deepseek-v4-flash" },
+    openai:    { endpoint: "https://api.openai.com/v1/chat/completions",   model: "gpt-4.1-mini" },
+    openrouter:{ endpoint: "https://openrouter.ai/api/v1/chat/completions", model: "openai/gpt-4.1-mini" },
     groq:      { endpoint: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile" },
     siliconflow:{ endpoint: "https://api.siliconflow.cn/v1/chat/completions", model: "deepseek-ai/DeepSeek-V3" },
     zhipu:     { endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", model: "glm-4-flash" }
   };
 
   var DEFAULT_CONFIG = {
-    llmEndpoint: "", llmApiKey: "", llmModel: "gpt-4o-mini",
-    autoBlock: true, useLLM: true,
+    llmEndpoint: "", llmApiKey: "", llmModel: "gpt-4.1-mini",
+    autoBlock: true, testMode: false, useLLM: true,
     bayesMinConfidence: 0.82, llmMinConfidence: 0.55, llmReviewMargin: 0.12
   };
 
@@ -22,7 +22,7 @@
     btnExport: $("btnExport"), btnImport: $("btnImport"), btnDistill: $("btnDistill"), btnReset: $("btnReset"), importFile: $("importFile"),
     pipelineInfo: $("pipelineInfo"), learnInfo: $("learnInfo"), dataView: $("dataView"),
     provider: $("provider"), llmEndpoint: $("llmEndpoint"), llmApiKey: $("llmApiKey"), llmModel: $("llmModel"),
-    autoBlock: $("autoBlock"), useLLM: $("useLLM"),
+    autoBlock: $("autoBlock"), testMode: $("testMode"), useLLM: $("useLLM"),
     bayesThreshold: $("bayesThreshold"), bayesLabel: $("bayesLabel"),
     llmThreshold: $("llmThreshold"), llmLabel: $("llmLabel"),
     reviewMargin: $("reviewMargin"), reviewLabel: $("reviewLabel"),
@@ -71,6 +71,49 @@
     };
   }
 
+  function describeJob(job) {
+    job = job || {};
+    function layerText(layers) {
+      layers = layers || {};
+      var parts = [
+        ["人工屏蔽", layers["manual-spam"]],
+        ["自动屏蔽", layers["auto-spam"]],
+        ["纠错/正常", (layers["manual-ham"] || 0) + (layers["ai-release"] || 0) + (layers["auto-ham"] || 0)],
+        ["账号兜底", (layers["account-fallback"] || 0) + (layers["protected-account"] || 0)]
+      ].filter(function(p) { return p[1]; });
+      return parts.length ? " · " + parts.map(function(p) { return p[0] + " " + p[1]; }).join(" / ") : "";
+    }
+    if (job.status === "running") {
+      var detail = job.samples ? " · 本次样本 " + job.samples + " (spam " + (job.spamSamples || 0) + "/ham " + (job.hamSamples || 0) + ")" : "";
+      return "AI分析中: " + (job.step || "running") + detail + layerText(job.layers);
+    }
+    if (job.status === "success") {
+      return "AI分析完成: 规则 " + (job.rules || 0) +
+        " · 释放 " + (job.released || 0) +
+        " · 保护 " + (job.protected || 0) +
+        " · 本次样本 " + (job.analyzedSamples || 0) +
+        " (spam " + (job.analyzedSpam || 0) + "/ham " + (job.analyzedHam || 0) + ")" +
+        layerText(job.layers);
+    }
+    if (job.status === "error") return "AI分析失败: " + (job.error || "unknown");
+    return "";
+  }
+
+  function refreshDistillJob() {
+    chrome.runtime.sendMessage({ type: "XHB2_DISTILL_STATUS" }, function(res) {
+      if (chrome.runtime.lastError || !res || !res.ok) return;
+      var text = describeJob(res.job);
+      if (text) el.learnInfo.textContent = text;
+      if (res.job && res.job.status === "running") {
+        el.btnDistill.textContent = "分析中...";
+        el.btnDistill.disabled = true;
+      } else {
+        el.btnDistill.textContent = "AI分析规则";
+        el.btnDistill.disabled = false;
+      }
+    });
+  }
+
   function escapeHTML(text) {
     return String(text || "").replace(/[&<>"']/g, function(ch) {
       return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch];
@@ -81,10 +124,18 @@
     var raw = await chrome.storage.local.get("xhb2-db");
     var db = raw["xhb2-db"] || {};
     var accounts = Object.values(db.accounts || {}).filter(function(a) { return a.blocked; }).slice(-8).reverse();
+    var totalAccounts = Object.keys(db.accounts || {}).length;
+    var totalBlocked = Object.values(db.accounts || {}).filter(function(a) { return a.blocked; }).length;
+    var totalSamples = (db.samples || []).length;
+    var totalSpamSamples = (db.samples || []).filter(function(s) { return s.label === "spam"; }).length;
+    var totalHamSamples = (db.samples || []).filter(function(s) { return s.label === "ham"; }).length;
     var spamSamples = (db.samples || []).filter(function(s) { return s.label === "spam"; }).slice(-6).reverse();
     var hamSamples = (db.samples || []).filter(function(s) { return s.label === "ham"; }).slice(-6).reverse();
     var rules = (db.aiRules || []).slice(0, 5);
     var html = "";
+    html += '<div class="data-row"><div class="data-meta">数据范围</div>' +
+      '<div class="data-text">账号 ' + totalAccounts + ' · 已屏蔽 ' + totalBlocked + ' · 原始样本 ' + totalSamples +
+      ' (spam ' + totalSpamSamples + '/ham ' + totalHamSamples + ') · AI分析最多选取 80 条高权重代表样本</div></div>';
     html += '<div class="data-row"><div class="data-meta">最近屏蔽账号</div>' +
       (accounts.length ? accounts.map(function(a) {
         return '<div class="data-text">' + escapeHTML(a.handle) + ' ' + escapeHTML(a.displayName || "") + '</div>';
@@ -137,8 +188,9 @@
       var cfg = await getConfig();
       cfg.llmEndpoint = el.llmEndpoint.value.trim();
       cfg.llmApiKey = el.llmApiKey.value.trim();
-      cfg.llmModel = el.llmModel.value.trim() || "gpt-4o-mini";
+      cfg.llmModel = el.llmModel.value.trim() || "gpt-4.1-mini";
       cfg.autoBlock = el.autoBlock.checked;
+      cfg.testMode = el.testMode.checked;
       cfg.useLLM = el.useLLM.checked;
       cfg.bayesMinConfidence = parseInt(el.bayesThreshold.value) / 100;
       cfg.llmMinConfidence = parseInt(el.llmThreshold.value) / 100;
@@ -157,7 +209,7 @@
     getConfig().then(function(cfg) {
       var parts = ["① 账号库", "② 黄推规则", "③ 贝叶斯≥" + (cfg.bayesMinConfidence || 0.82).toFixed(2)];
       parts.push(cfg.useLLM && cfg.llmEndpoint ? "④ 边界±" + (cfg.llmReviewMargin || 0.12).toFixed(2) + "→LLM≥" + (cfg.llmMinConfidence || 0.55).toFixed(2) : "④ 不调 LLM");
-      parts.push(cfg.autoBlock === false ? "仅入库" : "自动屏蔽");
+      parts.push(cfg.testMode ? "测试模式" : (cfg.autoBlock === false ? "仅入库" : "自动屏蔽"));
       el.pipelineInfo.textContent = parts.join(" → ");
     });
   }
@@ -168,6 +220,7 @@
     el.llmApiKey.value = c.llmApiKey || "";
     el.llmModel.value = c.llmModel || "";
     el.autoBlock.checked = c.autoBlock !== false;
+    el.testMode.checked = c.testMode === true;
     el.useLLM.checked = c.useLLM !== false;
     el.bayesThreshold.value = Math.round((c.bayesMinConfidence || 0.82) * 100);
     el.bayesLabel.textContent = (c.bayesMinConfidence || 0.82).toFixed(2);
@@ -216,8 +269,9 @@
       var cfg = await getConfig();
       cfg.llmEndpoint = el.llmEndpoint.value.trim();
       cfg.llmApiKey = el.llmApiKey.value.trim();
-      cfg.llmModel = el.llmModel.value.trim() || "gpt-4o-mini";
+      cfg.llmModel = el.llmModel.value.trim() || "gpt-4.1-mini";
       cfg.autoBlock = el.autoBlock.checked;
+      cfg.testMode = el.testMode.checked;
       cfg.useLLM = el.useLLM.checked;
       cfg.bayesMinConfidence = parseInt(el.bayesThreshold.value) / 100;
       cfg.llmMinConfidence = parseInt(el.llmThreshold.value) / 100;
@@ -229,29 +283,15 @@
       toast("配置保存失败: " + e.message, false);
       return;
     }
-    var finished = false;
-    var watchdog = setTimeout(function() {
-      if (finished) return;
-      finished = true;
-      el.btnDistill.textContent = "AI分析规则";
-      el.btnDistill.disabled = false;
-      toast("分析超时，请检查 API 或稍后重试", false);
-      loadStats();
-    }, 60000);
     chrome.runtime.sendMessage({ type: "XHB2_DISTILL_RULES" }, function(res) {
-      if (finished) return;
-      finished = true;
-      clearTimeout(watchdog);
-      el.btnDistill.textContent = "AI分析规则";
-      el.btnDistill.disabled = false;
       if (chrome.runtime.lastError) {
         toast("分析失败: " + chrome.runtime.lastError.message, false);
         loadStats();
         return;
       }
-      if (res && res.ok) {
-        toast("规则 " + res.rules + " 条，释放 " + (res.released || 0) + " 个，保护 " + (res.protected || 0) + " 个", true);
-        loadStats();
+      if (res && res.ok && res.running) {
+        toast(res.started ? "AI分析已启动" : "AI分析已在运行", true);
+        refreshDistillJob();
       } else {
         toast("分析失败: " + (res && res.error || "unknown"), false);
       }
@@ -323,5 +363,6 @@
     el.importFile.value = "";
   });
 
-  loadConfig(); loadStats();
+  loadConfig(); loadStats(); refreshDistillJob();
+  setInterval(refreshDistillJob, 3000);
 })();

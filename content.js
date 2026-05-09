@@ -8,7 +8,7 @@
   var BLOCKED = "xhb2-blocked";
   var MAX_FEATURES = 1500;
 
-  var config = { autoBlock: true, bayesMinConfidence: 0.82, llmMinConfidence: 0.55, llmReviewMargin: 0.12, useLLM: true };
+  var config = { autoBlock: true, testMode: false, bayesMinConfidence: 0.82, llmMinConfidence: 0.55, llmReviewMargin: 0.12, useLLM: true };
   var blockedHandles = new Set();
   var db = null;
   var observer = null;
@@ -79,6 +79,7 @@
     db.aiRules = db.aiRules || [];
     var cfg = raw["xhb2-config"] || {};
     config.autoBlock = cfg.autoBlock !== false;
+    config.testMode = cfg.testMode === true;
     config.bayesMinConfidence = cfg.bayesMinConfidence || 0.82;
     config.llmMinConfidence = cfg.llmMinConfidence || 0.55;
     config.llmReviewMargin = cfg.llmReviewMargin || 0.12;
@@ -266,7 +267,7 @@
     ].join(" ").trim();
   }
 
-  function recordSample(text, profile, label, source, reason, weight) {
+  function recordSample(text, profile, label, source, reason, weight, category) {
     if (!db) return;
     db.samples = db.samples || [];
     if (!label && source === "llm") {
@@ -279,6 +280,7 @@
       source: source || "",
       reason: reason || "",
       weight: weight || 1,
+      category: category || inferSampleCategory(label, source),
       text: String(text || "").slice(0, 1000),
       displayName: String(profile && profile.displayName || "").slice(0, 80),
       handle: String(profile && profile.handle || "").slice(0, 32),
@@ -286,6 +288,14 @@
       at: new Date().toISOString()
     });
     if (db.samples.length > 500) db.samples = db.samples.slice(db.samples.length - 500);
+  }
+
+  function inferSampleCategory(label, source) {
+    if (source === "manual" || source === "manual-confirm") return "manual-spam";
+    if (source === "restore") return "manual-ham";
+    if (source === "ai-release") return "ai-release";
+    if (label) return "auto-spam";
+    return "auto-ham";
   }
 
   // ── Add to account DB ──
@@ -397,7 +407,7 @@
         await saveState();
       }
       applyMask(article, "manual");
-      if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
+      if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
       btn.textContent = "✅"; btn.disabled = false;
     };
     article.appendChild(btn);
@@ -425,7 +435,7 @@
             addMentionedAccounts(confirmText, confirmProfile, "manual-confirm", "manual-confirm");
             article.setAttribute("data-xhb2-corrected", "spam");
             await saveState();
-            if (config.autoBlock) enqueueAutoBlock(article, confirmProfile.handle);
+            if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, confirmProfile.handle);
           }
         }
         return;
@@ -525,7 +535,7 @@
         addMentionedAccounts(text, profile, heuristic.reason, "heuristic");
         await saveState();
         applyMask(article, heuristic.reason + ":" + heuristic.conf.toFixed(2));
-        if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
+        if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
         return;
       }
 
@@ -539,7 +549,7 @@
         addMentionedAccounts(text, profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes");
         await saveState();
         applyMask(article, "bayes:" + result.conf.toFixed(2));
-        if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
+        if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
         return;
       }
       if (result.conf >= Math.min(0.94, localThreshold + 0.08) && !result.spam) return;
@@ -558,7 +568,7 @@
           addMentionedAccounts(text, profile, "llm:" + (llm.reason || ""), "llm");
           await saveState();
           applyMask(article, "llm:" + (llm.confidence || 0).toFixed(2));
-          if (config.autoBlock) enqueueAutoBlock(article, profile.handle);
+          if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
         } else if (llm && !llm.isSpam && (llm.confidence || 0) >= config.llmMinConfidence) {
           trainLocal(trainingText, false);
           recordSample(text, profile, false, "llm", llm.reason || "", 1);

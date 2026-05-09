@@ -25,6 +25,10 @@ It combines manual blocking, local learning, local rules, and optional LLM revie
 
 After code changes, click `Reload` on the extension card and refresh X.com.
 
+For testing, enable `测试模式` in the popup. Test mode still writes local samples,
+account state, and correction weights, but it will not click through X.com's
+native block flow.
+
 ## How It Works
 
 The classifier runs in this order:
@@ -41,6 +45,7 @@ The classifier runs in this order:
    - LLM results are written back as weighted samples.
 5. AI rule distillation
    - The popup button `AI分析规则` asks the LLM to summarize local samples into compact rules.
+   - The analyzer samples up to 80 representative records by layer, not just the newest rows.
 
 ## Signals Used
 
@@ -105,6 +110,17 @@ Accounts are protected from automatic release if:
 
 The analysis has timeout/error handling. If it fails, the popup should show the reason.
 
+The analyzer currently uses stratified sampling:
+
+- Up to 25 high-weight manual spam samples
+- Up to 20 automatic spam samples
+- Up to 20 restore, release, or normal correction samples
+- Up to 10 recent samples
+- Up to 5 account fallback samples when blocked accounts have little text evidence
+
+This keeps manual judgement and false-positive corrections visible to the LLM
+while still preventing the prompt from growing without limit.
+
 ## Data View
 
 The popup includes `查看本地数据`.
@@ -159,6 +175,22 @@ Required fields:
 - Endpoint
 - API Key
 - Model
+
+For DeepSeek, use a non-reasoning model for rule analysis:
+
+- Recommended: `deepseek-v4-flash`
+- Also OK: `deepseek-v4-pro`
+- Avoid: `deepseek-reasoner`, because it may return reasoning text without final JSON
+
+Preset models are intentionally non-reasoning / direct-answer models because `AI分析规则` needs strict JSON:
+
+- OpenAI: `gpt-4.1-mini`
+- OpenRouter: `openai/gpt-4.1-mini`
+- Groq: `llama-3.3-70b-versatile`
+- SiliconFlow: `deepseek-ai/DeepSeek-V3`
+- Zhipu GLM: `glm-4-flash`
+
+If a provider adds a newer direct chat/flash model, prefer that over a reasoning model for this extension.
 
 The extension uses standard chat-completions style requests.
 
