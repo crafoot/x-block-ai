@@ -11,8 +11,11 @@ It combines manual blocking, local learning, local rules, and optional LLM revie
 - Learns from manual blocks with a local Naive Bayes model.
 - Uses nickname, username, comment text, and mentioned accounts as signals.
 - Calls an LLM only for uncertain or borderline cases when configured.
+- Auto matches hide the current comment first; accounts enter the local block list only when evidence is strong.
 - Periodically distills local samples into compact AI rules.
 - Supports false-positive correction through `恢复`.
+- Includes `复核误杀` to locally release weak-evidence automatic blocks.
+- Includes `重置自动学习` to clear only automatic learning data while keeping manual actions and protected accounts.
 - Can release likely false-positive accounts during AI rule analysis, while protecting manually blocked accounts.
 - Exports/imports the local database as JSON.
 
@@ -90,6 +93,7 @@ It will:
 - Train the local model as ham.
 - Record a high-weight correction sample.
 - Remove the account from the local blocked list.
+- Protect the account from future automatic re-blocking unless you manually hide it again.
 
 ### 恢复后再隐藏
 
@@ -132,6 +136,20 @@ while still preventing the prompt from growing without limit.
 When the LLM returns `releaseHandles`, the extension removes those accounts from
 the local blocked list and records an `ai-release` ham sample. Manual blocks and
 manual-confirm blocks are protected from automatic release.
+
+## False-positive Review
+
+Click `复核误杀` in the popup to release local blocked accounts that look weakly supported by evidence.
+
+It only targets automatic blocks from heuristic, Bayes, LLM, or imported account-db sources. Manual blocks, restored accounts, AI-released accounts, and manual-confirm blocks are protected.
+
+This is useful after an older aggressive build created many false positives. Run it after reloading the extension, then browse normally and use `恢复` on any remaining normal comments. If old automatic samples still make the classifier too aggressive, use `重置自动学习`.
+
+## Reset Automatic Learning
+
+Click `重置自动学习` if you want to keep manual blocks and restores, but wipe the automatic classifier state that may have learned too aggressively.
+
+It removes auto-generated accounts and auto samples, then resets the Bayes model and distilled AI rules. The Bayes model is rebuilt from the remaining manual block/restore history, so protected accounts and manual corrections stay useful.
 
 ## Data View
 
@@ -208,8 +226,9 @@ The extension uses standard chat-completions style requests.
 
 ## Recommended Settings
 
-- Keep `本地贝叶斯自动屏蔽阈值` relatively high.
-- Keep `边界复核范围` around `0.08` to `0.15`.
+- Keep `本地贝叶斯自动屏蔽阈值` around `0.90` or higher.
+- Keep `大模型判定阈值` around `0.72` or higher.
+- Keep `边界复核范围` around `0.08` to `0.12`.
 - If false positives are high, increase the Bayes threshold or reduce the review range.
 - Use `恢复` whenever a normal comment is masked, so the model learns.
 

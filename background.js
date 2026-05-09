@@ -19,8 +19,9 @@ var CONFIG = {
   llmEndpoint: "",
   llmApiKey: "",
   llmModel: "gpt-4.1-mini",
-  bayesMinConfidence: 0.82,
-  llmMinConfidence: 0.55
+  bayesMinConfidence: 0.9,
+  llmMinConfidence: 0.72,
+  llmReviewMargin: 0.1
 };
 var distillPromise = null;
 
@@ -487,7 +488,90 @@ function sanitizeReleaseHandles(list) {
 function isProtectedAccount(acc) {
   var sources = (acc.sources || []).join(",");
   var reasons = (acc.reasons || []).join(",");
-  return /manual|manual-confirm/.test(sources + "," + reasons);
+  return !!(acc && acc.userReleasedAt) || /manual|manual-confirm|restore|ai-release|local-review/.test(sources + "," + reasons);
+}
+
+function weakAutoBlockedAccount(acc, samples) {
+  if (!acc || !acc.blocked || isProtectedAccount(acc)) return false;
+  var sources = (acc.sources || []).join(",");
+  if (!/(heuristic|bayes|llm|account-db)/.test(sources)) return false;
+  var related = samples || [];
+  var spamWeight = related.filter(function(s) { return s.label === "spam"; })
+    .reduce(function(sum, s) { return sum + sampleWeight(s); }, 0);
+  var hamWeight = related.filter(function(s) { return s.label === "ham"; })
+    .reduce(function(sum, s) { return sum + sampleWeight(s); }, 0);
+  var evidence = accountEvidenceScore(acc, related);
+  var text = [
+    acc.handle || "",
+    acc.displayName || "",
+    (acc.reasons || []).join(" "),
+    related.map(function(s) { return s.text || ""; }).join(" ")
+  ].join(" ").toLowerCase();
+  var strongAdult = /(外围|援交|楼凤|裸聊|卖淫|约炮|onlyfans|fansly|escort|nudes?|telegram|电报|加v|加微)/i.test(text);
+  if (hamWeight >= spamWeight && !strongAdult) return true;
+  if ((acc.blockCount || 0) <= 1 && evidence <= 3 && !strongAdult) return true;
+  return false;
+}
+
+function reviewFalsePositiveAccounts() {
+  DB = normalizeDB(DB);
+  var released = [];
+  Object.keys(DB.accounts || {}).forEach(function(h) {
+    var acc = DB.accounts[h];
+    var related = accountSamplesByHandle(h);
+    if (!weakAutoBlockedAccount(acc, related)) return;
+    acc.blocked = false;
+    acc.userReleasedAt = new Date().toISOString();
+    acc.releasedAt = new Date().toISOString();
+    acc.releaseReason = "local-false-positive-review";
+    acc.reasons = Array.from(new Set((acc.reasons || []).concat(["local-review-release"])));
+    acc.sources = Array.from(new Set((acc.sources || []).concat(["local-review"])));
+    released.push("@" + h);
+    DB.samples.push({
+      label: "ham",
+      source: "local-review",
+      reason: "weak-auto-evidence",
+      weight: 3,
+      category: "ai-release",
+      displayName: acc.displayName || "",
+      handle: acc.handle || "@" + h,
+      text: "",
+      at: new Date().toISOString()
+    });
+  });
+  compactSamples(false);
+  return released;
+}
+
+function resetAutoLearning() {
+  DB = normalizeDB(DB);
+  var keptAccounts = {};
+  Object.keys(DB.accounts || {}).forEach(function(h) {
+    var acc = DB.accounts[h];
+    if (!acc) return;
+    if (isProtectedAccount(acc)) {
+      keptAccounts[h] = acc;
+      return;
+    }
+    var sources = (acc.sources || []).join(",");
+    if (!/(heuristic|bayes|llm|account-db|local-review)/.test(sources)) {
+      keptAccounts[h] = acc;
+    }
+  });
+  DB.accounts = keptAccounts;
+  DB.samples = (DB.samples || []).filter(function(s) {
+    return /manual|manual-confirm|restore|ai-release|local-review/.test(s.source || "");
+  });
+  rebuildBayesFromSamples(DB.samples);
+  DB.aiRules = [];
+  DB.aiRulesUpdatedAt = "";
+  DB.aiRulesSampleCount = 0;
+  DB.aiRulesSampleWeight = 0;
+  DB.distillJob = { status: "idle", updatedAt: new Date().toISOString() };
+  return {
+    accounts: Object.keys(DB.accounts).length,
+    samples: DB.samples.length
+  };
 }
 
 function accountEvidenceScore(acc, samples) {
@@ -630,6 +714,7 @@ function buildDistillPrompt(samples, accountAudit) {
     "输入是用户本地样本，spam=应屏蔽，ham=误杀或正常。",
     "samples 用于蒸馏规则；accountAudit 是已屏蔽账号复核候选，用于发现误杀账号。",
     "weight 越高越重要：手动屏蔽和手动恢复优先级最高。",
+    "category=auto-suspect 表示弱证据临时遮罩，不是强确认屏蔽；只能作为辅助线索，不能单独生成规则。",
     "原始屏蔽库可能包含误杀。请认真复核 accountAudit，可在 releaseHandles 输出应释放的误杀账号。",
     "释放标准：账号不像黄推/营销/导流；最近 5 条 recentPosts 或最近评论样本看起来正常；没有成人导流、互关涨粉、私信主页、Telegram/OnlyFans 等强证据；且不是人工保护账号。",
     "不要释放 protected=true、人工屏蔽、人工确认或有明确黄推证据的账号。",
@@ -669,12 +754,49 @@ function accountFallbackSamples() {
   });
 }
 
+function sampleTrainingText(sample) {
+  return [
+    sample && sample.displayName || "",
+    sample && sample.handle || "",
+    sample && sample.text || ""
+  ].join(" ").trim();
+}
+
+function confirmedSpamSample(sample) {
+  return sample && sample.label === "spam" && sampleCategory(sample) !== "auto-suspect";
+}
+
+function distillSignalWeight(sample) {
+  var category = sampleCategory(sample);
+  if (category === "auto-suspect") return 0;
+  return sampleWeight(sample);
+}
+
+function rebuildBayesFromSamples(samples) {
+  DB.bayes = { spamCount: 0, hamCount: 0, words: {} };
+  (samples || []).forEach(function(sample) {
+    if (!sample || sampleCategory(sample) === "auto-suspect") return;
+    if (sample.label !== "spam" && sample.label !== "ham") return;
+    var feats = getFeatures(sampleTrainingText(sample));
+    if (!feats.length) return;
+    if (sample.label === "spam") DB.bayes.spamCount++;
+    else DB.bayes.hamCount++;
+    feats.forEach(function(f) {
+      DB.bayes.words[f] = DB.bayes.words[f] || { spam: 0, ham: 0 };
+      if (sample.label === "spam") DB.bayes.words[f].spam++;
+      else DB.bayes.words[f].ham++;
+    });
+  });
+  pruneBayes();
+}
+
 function sampleCategory(sample) {
   if (sample.category) return sample.category;
   if (sample.source === "manual" || sample.source === "manual-confirm") return "manual-spam";
   if (sample.source === "restore") return "manual-ham";
   if (sample.source === "ai-release") return "ai-release";
   if (sample.source === "account-db") return "account-fallback";
+  if (/-observe$/.test(sample.source || "")) return "auto-suspect";
   if (sample.label === "spam") return "auto-spam";
   return "auto-ham";
 }
@@ -709,6 +831,7 @@ function pickDistillSamples(samples) {
   var selected = [];
   selected = selected.concat(takeLayer(samples, function(s) { return sampleCategory(s) === "manual-spam"; }, 25, used));
   selected = selected.concat(takeLayer(samples, function(s) { return sampleCategory(s) === "auto-spam"; }, 20, used));
+  selected = selected.concat(takeLayer(samples, function(s) { return sampleCategory(s) === "auto-suspect"; }, 8, used));
   selected = selected.concat(takeLayer(samples, function(s) { return /manual-ham|ai-release|auto-ham/.test(sampleCategory(s)); }, 20, used));
   selected = selected.concat(takeLayer(samples.slice().sort(function(a, b) {
     return String(b.at || "").localeCompare(String(a.at || ""));
@@ -736,16 +859,18 @@ async function distillRules() {
   await setDistillJob({ status: "running", step: "checking-config", error: "", startedAt: new Date().toISOString() });
   if (!CONFIG.llmEndpoint || !CONFIG.llmApiKey) throw new Error("请先配置大模型 API");
   var samples = pickDistillSamples(DB.samples);
-  var spam = samples.filter(function(s) { return s.label === "spam"; }).length;
+  var spam = samples.filter(confirmedSpamSample).length;
+  var suspectSpam = samples.filter(function(s) { return sampleCategory(s) === "auto-suspect"; }).length;
   if (spam < 8) {
     samples = pickDistillSamples(samples.concat(accountFallbackSamples()));
   }
-  spam = samples.filter(function(s) { return s.label === "spam"; }).length;
+  spam = samples.filter(confirmedSpamSample).length;
+  suspectSpam = samples.filter(function(s) { return sampleCategory(s) === "auto-suspect"; }).length;
   var ham = samples.filter(function(s) { return s.label === "ham"; }).length;
   if (spam < 8) throw new Error("屏蔽样本太少，至少需要 8 条");
   var accountAudit = pickAccountAuditCandidates();
   var layers = layerCounts(samples);
-  await setDistillJob({ status: "running", step: "calling-llm", samples: samples.length, spamSamples: spam, hamSamples: ham, accountAudit: accountAudit.length, layers: layers });
+  await setDistillJob({ status: "running", step: "calling-llm", samples: samples.length, spamSamples: spam, suspectSpamSamples: suspectSpam, hamSamples: ham, accountAudit: accountAudit.length, layers: layers });
 
   var parsed = await fetchLLMJSON({
     model: CONFIG.llmModel || "gpt-4.1-mini",
@@ -763,7 +888,7 @@ async function distillRules() {
   var release = applyReleaseSuggestions(sanitizeReleaseHandles(parsed.releaseHandles));
   DB.aiRulesUpdatedAt = new Date().toISOString();
   DB.aiRulesSampleCount = DB.samples.length;
-  DB.aiRulesSampleWeight = DB.samples.reduce(function(sum, s) { return sum + sampleWeight(s); }, 0);
+  DB.aiRulesSampleWeight = DB.samples.reduce(function(sum, s) { return sum + distillSignalWeight(s); }, 0);
   compactSamples(true);
   return new Promise(function(resolve) {
     DB.distillJob = Object.assign({}, DB.distillJob || {}, {
@@ -776,6 +901,7 @@ async function distillRules() {
       analyzedSamples: samples.length,
       analyzedAccounts: accountAudit.length,
       analyzedSpam: spam,
+      analyzedSuspectSpam: suspectSpam,
       analyzedHam: ham,
       layers: layers,
       totalSamples: DB.samples.length,
@@ -799,12 +925,13 @@ async function distillRules() {
 
 function getDistillStatus() {
   DB = normalizeDB(DB);
-  var totalWeight = DB.samples.reduce(function(sum, s) { return sum + sampleWeight(s); }, 0);
+  var totalWeight = DB.samples.reduce(function(sum, s) { return sum + distillSignalWeight(s); }, 0);
   var lastWeight = DB.aiRulesSampleWeight || 0;
   var newWeight = Math.max(0, totalWeight - lastWeight);
   var lastAt = DB.aiRulesUpdatedAt ? Date.parse(DB.aiRulesUpdatedAt) : 0;
   var enoughTime = !lastAt || Date.now() - lastAt >= MIN_DISTILL_INTERVAL_MS;
-  var spam = DB.samples.filter(function(s) { return s.label === "spam"; }).length;
+  var spam = DB.samples.filter(confirmedSpamSample).length;
+  var suspectSpam = DB.samples.filter(function(s) { return sampleCategory(s) === "auto-suspect"; }).length;
   var ham = DB.samples.filter(function(s) { return s.label === "ham"; }).length;
   var ready = spam >= MIN_DISTILL_SPAM && newWeight >= MIN_DISTILL_NEW_WEIGHT && enoughTime;
   return {
@@ -813,6 +940,7 @@ function getDistillStatus() {
     sampleWeight: totalWeight,
     newWeight: newWeight,
     spamSamples: spam,
+    suspectSpamSamples: suspectSpam,
     hamSamples: ham,
     aiRules: DB.aiRules.length,
     updatedAt: DB.aiRulesUpdatedAt || "",
@@ -879,6 +1007,30 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
     refreshState().then(function() {
       DB = normalizeDB(DB);
       sendResponse({ ok: true, status: getDistillStatus(), job: DB.distillJob || { status: "idle" } });
+    });
+    return true;
+  }
+
+  if (msg.type === "XHB2_REVIEW_FALSE_POSITIVES") {
+    refreshState().then(function() {
+      var released = reviewFalsePositiveAccounts();
+      saveDB(function() {
+        sendResponse({ ok: true, released: released.length, handles: released.slice(0, 20) });
+      });
+    }).catch(function(err) {
+      sendResponse({ ok: false, error: err.message });
+    });
+    return true;
+  }
+
+  if (msg.type === "XHB2_RESET_AUTO_LEARNING") {
+    refreshState().then(function() {
+      var summary = resetAutoLearning();
+      saveDB(function() {
+        sendResponse({ ok: true, summary: summary });
+      });
+    }).catch(function(err) {
+      sendResponse({ ok: false, error: err.message });
     });
     return true;
   }

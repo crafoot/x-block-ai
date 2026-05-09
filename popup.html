@@ -53,10 +53,12 @@ summary{font-size:11px;color:#64748b;cursor:pointer;margin:6px 0}
     <div class="stat"><div class="stat-val" id="statVocab">0</div><div class="stat-label">特征词</div></div>
   </div>
   <div class="pipeline" id="learnInfo">样本 0 · AI规则 0</div>
-  <div style="margin-top:8px;display:flex;gap:6px">
+  <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
     <button id="btnExport" class="btn-sm">📤导出</button>
     <button id="btnImport" class="btn-sm">📥导入</button>
     <button id="btnDistill" class="btn-sm">AI分析规则</button>
+    <button id="btnReviewFalsePositive" class="btn-sm">复核误杀</button>
+    <button id="btnResetAuto" class="btn-sm">重置自动学习</button>
     <button id="btnReset" class="btn-sm btn-danger">清空学习库</button>
   </div>
   <details>
@@ -96,12 +98,12 @@ summary{font-size:11px;color:#64748b;cursor:pointer;margin:6px 0}
   <input id="llmApiKey" type="password" placeholder="sk-..." style="margin-bottom:4px">
   <label>Model</label>
   <input id="llmModel" placeholder="例如 deepseek-v4-flash / gpt-4.1-mini / glm-4-flash" style="margin-bottom:6px">
-  <label>贝叶斯自动屏蔽阈值 <span id="bayesLabel" style="font-weight:400">0.82</span></label>
-  <input id="bayesThreshold" type="range" min="60" max="95" value="82" style="width:100%;margin-bottom:6px">
-  <label>大模型判定阈值 <span id="llmLabel" style="font-weight:400">0.55</span></label>
-  <input id="llmThreshold" type="range" min="50" max="95" value="55" style="width:100%;margin-bottom:6px">
-  <label>边界复核范围 <span id="reviewLabel" style="font-weight:400">0.12</span></label>
-  <input id="reviewMargin" type="range" min="5" max="25" value="12" style="width:100%;margin-bottom:6px">
+  <label>贝叶斯自动屏蔽阈值 <span id="bayesLabel" style="font-weight:400">0.90</span></label>
+  <input id="bayesThreshold" type="range" min="70" max="98" value="90" style="width:100%;margin-bottom:6px">
+  <label>大模型判定阈值 <span id="llmLabel" style="font-weight:400">0.72</span></label>
+  <input id="llmThreshold" type="range" min="60" max="95" value="72" style="width:100%;margin-bottom:6px">
+  <label>边界复核范围 <span id="reviewLabel" style="font-weight:400">0.10</span></label>
+  <input id="reviewMargin" type="range" min="5" max="20" value="10" style="width:100%;margin-bottom:6px">
   <button id="btnSave" class="btn-primary">💾 保存配置</button>
 </div>
 

@@ -10,8 +10,9 @@
     llmApiKey: "",
     llmModel: "gpt-4o-mini",
     autoBlock: true,
-    bayesMinConfidence: 0.82,
-    llmMinConfidence: 0.55,
+    bayesMinConfidence: 0.9,
+    llmMinConfidence: 0.72,
+    llmReviewMargin: 0.1,
     useLLM: true
   };
 

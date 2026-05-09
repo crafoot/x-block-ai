@@ -8,7 +8,7 @@
   var BLOCKED = "xhb2-blocked";
   var MAX_FEATURES = 1500;
 
-  var config = { autoBlock: true, testMode: false, bayesMinConfidence: 0.82, llmMinConfidence: 0.55, llmReviewMargin: 0.12, useLLM: true };
+  var config = { autoBlock: true, testMode: false, bayesMinConfidence: 0.9, llmMinConfidence: 0.72, llmReviewMargin: 0.1, useLLM: true };
   var blockedHandles = new Set();
   var db = null;
   var observer = null;
@@ -18,6 +18,8 @@
   var prunedOnce = false;
   var stateReady = null;
   var recentPostSaveTimer = null;
+  var LLM_HARD_BLOCK_CONFIDENCE = 0.88;
+  var BAYES_HARD_BLOCK_CONFIDENCE = 0.97;
 
   var AI_RULES = [
     {
@@ -82,9 +84,9 @@
     var cfg = raw["xhb2-config"] || {};
     config.autoBlock = cfg.autoBlock !== false;
     config.testMode = cfg.testMode === true;
-    config.bayesMinConfidence = cfg.bayesMinConfidence || 0.82;
-    config.llmMinConfidence = cfg.llmMinConfidence || 0.55;
-    config.llmReviewMargin = cfg.llmReviewMargin || 0.12;
+    config.bayesMinConfidence = cfg.bayesMinConfidence || 0.9;
+    config.llmMinConfidence = cfg.llmMinConfidence || 0.72;
+    config.llmReviewMargin = cfg.llmReviewMargin || 0.1;
     config.useLLM = cfg.useLLM !== false && !!cfg.llmEndpoint && !!cfg.llmApiKey;
     blockedHandles = new Set(raw[BLOCKED] || []);
     if (!prunedOnce) {
@@ -309,6 +311,7 @@
     if (source === "manual" || source === "manual-confirm") return "manual-spam";
     if (source === "restore") return "manual-ham";
     if (source === "ai-release") return "ai-release";
+    if (/-observe$/.test(source || "")) return "auto-suspect";
     if (label) return "auto-spam";
     return "auto-ham";
   }
@@ -331,6 +334,79 @@
       };
     }
     blockedHandles.add(h);
+  }
+
+  function addObservation(profile, reason, source) {
+    var h = (profile.handle || "").toLowerCase().replace(/^@/, "");
+    if (!h) return;
+    var now = new Date().toISOString();
+    var acc = db.accounts[h];
+    if (acc) {
+      acc.displayName = acc.displayName || profile.displayName || "";
+      acc.lastSeen = now;
+      acc.observationCount = (acc.observationCount || 0) + 1;
+      acc.reasons = Array.from(new Set((acc.reasons || []).concat([reason])));
+      acc.sources = Array.from(new Set((acc.sources || []).concat([source])));
+    } else {
+      db.accounts[h] = {
+        handle: "@" + h,
+        displayName: profile.displayName || "",
+        blocked: false,
+        reasons: [reason],
+        sources: [source],
+        firstSeen: now,
+        lastSeen: now,
+        blockCount: 0,
+        observationCount: 1
+      };
+    }
+  }
+
+  function shouldProtectFromAuto(profile) {
+    var h = (profile && profile.handle || "").toLowerCase().replace(/^@/, "");
+    var acc = h && db && db.accounts ? db.accounts[h] : null;
+    if (!acc) return false;
+    var sources = (acc.sources || []).join(",");
+    var reasons = (acc.reasons || []).join(",");
+    return !!acc.userReleasedAt || /restore|ai-release|local-review/.test(sources + "," + reasons);
+  }
+
+  function strongAccountEvidence(text, profile, reason, confidence) {
+    var haystack = [
+      text || "",
+      profile && profile.displayName || "",
+      profile && profile.handle || "",
+      reason || ""
+    ].join(" ").toLowerCase();
+    if (confidence >= 0.98) return true;
+    var hasAdult = /(外围|援交|楼凤|裸聊|卖淫|约炮|口交|onlyfans|fansly|escort|nudes?|🔞|18\+)/i.test(haystack);
+    var hasFunnel = /(主页|点主页|私信|加v|加微|电报|telegram|tg|whatsapp)/i.test(haystack);
+    var hasService = /(福利|资源|视频|写真|可约|上门|空降|服务|约|裸|骚|成人)/i.test(haystack);
+    if (hasAdult && confidence >= 0.92) return true;
+    if (hasFunnel && hasService && confidence >= 0.9) return true;
+    return false;
+  }
+
+  async function handleAutoSpam(article, text, profile, reason, source, confidence, sampleWeight, hardBlock) {
+    if (shouldProtectFromAuto(profile)) {
+      trainLocal(getProfileTrainingText(text, profile), false, true);
+      recordSample(text, profile, false, "auto-protected", "protected-after-restore", 4, "manual-ham");
+      await saveState();
+      return;
+    }
+
+    var canBlockAccount = hardBlock || strongAccountEvidence(text, profile, reason, confidence);
+    if (canBlockAccount) {
+      addAccount(profile, reason, source);
+      addMentionedAccounts(text, profile, reason, source);
+      trainLocal(getProfileTrainingText(text, profile), true);
+      recordSample(text, profile, true, source, reason, sampleWeight || 1);
+    } else {
+      addObservation(profile, reason, source + "-observe");
+      recordSample(text, profile, true, source + "-observe", reason, 1, "auto-suspect");
+    }
+    await saveState();
+    applyMask(article, reason + ":" + confidence.toFixed(2));
   }
 
   function rememberRecentPost(profile, text) {
@@ -358,7 +434,9 @@
     if (!h || !db.accounts[h]) return;
     db.accounts[h].blocked = false;
     db.accounts[h].unblockedAt = new Date().toISOString();
+    db.accounts[h].userReleasedAt = new Date().toISOString();
     db.accounts[h].reasons = Array.from(new Set((db.accounts[h].reasons || []).concat([reason || "restore"])));
+    db.accounts[h].sources = Array.from(new Set((db.accounts[h].sources || []).concat(["restore"])));
     blockedHandles.delete(h);
   }
 
@@ -575,17 +653,12 @@
     classifying.add(h);
 
     try {
-      var localThreshold = config.bayesMinConfidence || 0.82;
+      var localThreshold = config.bayesMinConfidence || 0.9;
       var reviewFloor = Math.max(0.5, localThreshold - config.llmReviewMargin);
 
       var heuristic = classifyHeuristic(text, profile);
       if (heuristic.spam && heuristic.conf >= Math.min(0.94, localThreshold + 0.08)) {
-        addAccount(profile, heuristic.reason, "heuristic");
-        trainLocal(getProfileTrainingText(text, profile), true);
-        recordSample(text, profile, true, "heuristic", heuristic.reason, 2);
-        addMentionedAccounts(text, profile, heuristic.reason, "heuristic");
-        await saveState();
-        applyMask(article, heuristic.reason + ":" + heuristic.conf.toFixed(2));
+        await handleAutoSpam(article, text, profile, heuristic.reason, "heuristic", heuristic.conf, 2, heuristic.conf >= 0.98);
         return;
       }
 
@@ -593,12 +666,7 @@
       var trainingText = getProfileTrainingText(text, profile);
       var result = classifyLocal(trainingText);
       if (result.conf >= Math.min(0.94, localThreshold + 0.08) && result.spam) {
-        addAccount(profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes");
-        trainLocal(trainingText, true);
-        recordSample(text, profile, true, "bayes", "bayes(" + result.conf.toFixed(2) + ")", 1);
-        addMentionedAccounts(text, profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes");
-        await saveState();
-        applyMask(article, "bayes:" + result.conf.toFixed(2));
+        await handleAutoSpam(article, text, profile, "bayes(" + result.conf.toFixed(2) + ")", "bayes", result.conf, 1, result.conf >= BAYES_HARD_BLOCK_CONFIDENCE);
         return;
       }
       if (result.conf >= Math.min(0.94, localThreshold + 0.08) && !result.spam) return;
@@ -611,12 +679,7 @@
       if (config.useLLM && needsLLMReview) {
         var llm = await callLLM(text, profile);
         if (llm && llm.isSpam && (llm.confidence || 0) >= config.llmMinConfidence) {
-          addAccount(profile, "llm:" + (llm.reason || ""), "llm");
-          trainLocal(trainingText, true);
-          recordSample(text, profile, true, "llm", llm.reason || "", 2);
-          addMentionedAccounts(text, profile, "llm:" + (llm.reason || ""), "llm");
-          await saveState();
-          applyMask(article, "llm:" + (llm.confidence || 0).toFixed(2));
+          await handleAutoSpam(article, text, profile, "llm:" + (llm.reason || ""), "llm", llm.confidence || 0, 2, (llm.confidence || 0) >= LLM_HARD_BLOCK_CONFIDENCE);
         } else if (llm && !llm.isSpam && (llm.confidence || 0) >= config.llmMinConfidence) {
           trainLocal(trainingText, false);
           recordSample(text, profile, false, "llm", llm.reason || "", 1);
