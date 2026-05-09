@@ -451,8 +451,12 @@
   }
 
   function isOriginalPostArticle(article) {
-    if (!/\/status\/\d+/.test(location.pathname)) return false;
-    return article === document.querySelector(ARTICLE);
+    var statusId = (location.pathname.match(/\/status\/(\d+)/) || [])[1];
+    if (!statusId) return false;
+    var profile = getProfile(article);
+    var articleHandle = (profile.handle || "").toLowerCase().replace(/^@/, "");
+    if (articleHandle !== getOriginalPosterHandle()) return false;
+    return !!article.querySelector('a[href*="/status/' + statusId + '"]');
   }
 
   function getProfilePageHandle() {
@@ -497,13 +501,20 @@
   }
 
   // ── DOM ──
-  function getText(article) { var el = article.querySelector(TEXT); return el ? el.innerText.trim() : ""; }
+  function getText(article) {
+    var el = article.querySelector(TEXT) || article.querySelector('[lang]');
+    return el ? el.innerText.trim() : "";
+  }
   function getProfile(article) {
     var el = article.querySelector(NAME); var raw = el ? el.innerText : "";
     var m = raw.match(/@([A-Za-z0-9_]+)/);
     if (!m) {
-      var link = article.querySelector('a[href^="/"][role="link"]');
-      if (link) m = (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9_]{1,15})(?:$|[/?#])/);
+      var links = article.querySelectorAll(NAME + ' a[href^="/"], a[href^="/"][role="link"]');
+      for (var i = 0; i < links.length && !m; i++) {
+        var href = links[i].getAttribute("href") || "";
+        if (/\/status\//.test(href)) continue;
+        m = href.match(/^\/([A-Za-z0-9_]{1,15})(?:$|[?#])/);
+      }
     }
     var at = raw.indexOf("@");
     return { displayName: m && raw && at > 0 ? raw.slice(0, at).trim() : raw.trim(), handle: m ? "@" + m[1] : "" };
@@ -522,15 +533,17 @@
       try {
         await ensureStateReady();
         var text = getText(article), profile = getProfile(article);
-        if (text && profile.handle) {
+        if (profile.handle) {
           addAccount(profile, "manual", "manual");
-          trainLocal(getProfileTrainingText(text, profile), true);
-          recordSample(text, profile, true, "manual", "manual", 4);
-          addMentionedAccounts(text, profile, "manual", "manual");
+          if (text) {
+            trainLocal(getProfileTrainingText(text, profile), true);
+            addMentionedAccounts(text, profile, "manual", "manual");
+          }
+          recordSample(text, profile, true, "manual", text ? "manual" : "manual-account-only", text ? 4 : 2);
           await saveState();
         }
         applyMask(article, "manual");
-        if (config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
+        if (profile.handle && config.autoBlock && !config.testMode) enqueueAutoBlock(article, profile.handle);
         ok = true;
       } catch (err) {
         console.warn("[X-block AI] manual block failed", err);
@@ -713,7 +726,7 @@
   // ── Process ──
   function processArticle(article) {
     var text = getText(article), profile = getProfile(article);
-    if (!text || !profile.handle) return;
+    if (!profile.handle) return;
     var key = getArticleKey(text, profile);
     if (article.getAttribute("data-xhb2-key") === key && article.hasAttribute("data-xhb2")) {
       if (!isOriginalPostArticle(article) && !article.querySelector(".xhb2-overlay")) ensureBlockBtn(article);
@@ -730,6 +743,7 @@
     if (isOriginalPostArticle(article)) return;
     ensureBlockBtn(article);
     if (isBlocked(profile.handle)) { applyMask(article, "account-db"); return; }
+    if (!text) return;
 
     var textNode = article.querySelector(TEXT);
     var media = article.querySelector('[data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="card.wrapper"]');
